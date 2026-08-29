@@ -7,6 +7,20 @@ from idea_migrate.errors import PathValidationError
 from idea_migrate.paths import MoveSpec, validate_move
 
 
+def _filesystem_is_case_insensitive(directory: Path) -> bool:
+    """Ask the filesystem holding ``directory`` whether it ignores letter case.
+
+    A probe directory is created with a mixed-case name; if the all-lowercase
+    spelling of that same name also resolves, the filesystem is case-insensitive.
+    """
+    probe = directory / "CaseProbe"
+    probe.mkdir()
+    try:
+        return (directory / "caseprobe").exists()
+    finally:
+        probe.rmdir()
+
+
 class PathTestCase(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -71,14 +85,28 @@ class TestRejections(PathTestCase):
             validate_move(self.source, inside, self.home)
         self.assertIn("inside", str(ctx.exception))
 
+    def test_destination_inside_source_with_a_missing_parent_reports_the_move(self):
+        # The parent directory "nested" does not exist. The useful message is
+        # that a directory cannot be moved into itself, not that a parent is
+        # missing, so the containment check has to run first.
+        inside = self.source / "nested" / "target"
+        with self.assertRaises(PathValidationError) as ctx:
+            validate_move(self.source, inside, self.home)
+        self.assertIn("inside", str(ctx.exception))
+
     def test_same_directory_is_rejected(self):
         with self.assertRaises(PathValidationError) as ctx:
             validate_move(self.source, self.source, self.home)
         self.assertIn("same directory", str(ctx.exception))
 
     def test_same_directory_under_a_different_capitalization_is_rejected(self):
-        # The filesystem is case-insensitive, so these name one real directory.
-        # This must report "same directory", not "already exists".
+        # On a case-insensitive filesystem these two spellings name one real
+        # directory, and that must be reported as "same directory" rather than
+        # "already exists". On a case-sensitive volume they are genuinely two
+        # different directories, so there is nothing here to reject and the
+        # test would otherwise fail misleadingly.
+        if not _filesystem_is_case_insensitive(self.home):
+            self.skipTest("filesystem is case-sensitive")
         other_case = self.home / "webstormprojects"
         with self.assertRaises(PathValidationError) as ctx:
             validate_move(self.source, other_case, self.home)
