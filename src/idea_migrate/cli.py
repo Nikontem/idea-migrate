@@ -138,6 +138,12 @@ def run_migration(
 
     if args.dry_run:
         changed = rewrite_products(products, variants, dry_run=True)
+        if changed:
+            print("Configuration files that would change:")
+            for file_path, count in sorted(changed.items()):
+                label = "reference" if count == 1 else "references"
+                print(f"  {file_path}  ({count} {label})")
+            print("")
         print(f"Dry run: {len(changed)} files would be modified. Nothing was written.")
         return 0
 
@@ -163,6 +169,7 @@ def run_migration(
             tool_version=__version__,
             created_at=now.isoformat(),
             home=str(spec.home),
+            jetbrains_root=str(config.jetbrains_root),
             source=str(spec.source),
             dest=str(spec.dest),
             move_status="pending",
@@ -171,6 +178,15 @@ def run_migration(
             undone_at=None,
         )
         write_manifest(backup_dir, manifest)
+
+        # Preflight. A dry run performs exactly the validation the real
+        # rewrite does - every rewritten file is parsed to confirm it is still
+        # well-formed XML - and writes nothing. Running it here means a
+        # destination path carrying a character XML cannot hold raw, such as
+        # "&" or "<", is rejected before the directory has been moved rather
+        # than after, which on a large project tree is the difference between
+        # a clear refusal and a wait of many minutes followed by one.
+        rewrite_products(products, variants, dry_run=True)
 
         move_directory(spec)
         moved = True

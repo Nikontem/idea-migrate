@@ -19,6 +19,7 @@ def sample_manifest() -> Manifest:
         tool_version="0.1.0",
         created_at="2026-08-29T14:30:05",
         home="/Users/tester",
+        jetbrains_root="/Users/tester/Library/Application Support/JetBrains",
         source="/Users/tester/WebstormProjects",
         dest="/Users/tester/Projects/WebstormProjects",
         move_status="moved",
@@ -48,6 +49,29 @@ class TestManifestRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 read_manifest(Path(tmp))
+
+
+class TestReadingAnOlderManifest(unittest.TestCase):
+    def test_missing_jetbrains_root_falls_back_to_the_default_location(self):
+        """A backup written before the field existed must stay undoable.
+
+        Those runs could only have used the default settings directory, so
+        that is the value filled in. Without this, reading such a manifest
+        raises and the backup becomes impossible to roll back through the
+        tool.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = Path(tmp)
+            write_manifest(backup_dir, sample_manifest())
+            path = backup_dir / MANIFEST_NAME
+            data = json.loads(path.read_text(encoding="utf-8"))
+            del data["jetbrains_root"]
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+            self.assertEqual(
+                read_manifest(backup_dir).jetbrains_root,
+                "/Users/tester/Library/Application Support/JetBrains",
+            )
 
 
 class TestWriteManifestIsAtomic(unittest.TestCase):

@@ -47,7 +47,15 @@ SOURCE="$(read_field source)"
 DEST="$(read_field dest)"
 UNDONE_AT="$(read_field undone_at)"
 HOME_DIR="$(read_field home)"
-JETBRAINS="$HOME_DIR/Library/Application Support/JetBrains"
+
+# Where the IDEs keep their settings. The manifest records it, because the
+# tool's configuration file can point it somewhere other than the default.
+# Manifests written before that field existed fall back to the default, which
+# is where those runs necessarily backed up from.
+JETBRAINS="$(read_field jetbrains_root)"
+if [ -z "$JETBRAINS" ]; then
+  JETBRAINS="$HOME_DIR/Library/Application Support/JetBrains"
+fi
 
 if [ -n "$UNDONE_AT" ]; then
   echo "This backup was already rolled back at $UNDONE_AT." >&2

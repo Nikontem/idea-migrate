@@ -1,5 +1,6 @@
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -13,6 +14,14 @@ from idea_migrate.errors import XmlIntegrityError
 QUIET = "/usr/sbin/cfprefsd\n"
 RUNNING = "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea\n"
 NOW = datetime(2026, 8, 29, 14, 30, 5)
+
+
+# run_migration calls rewrite_products twice: once as a dry-run preflight
+# before the move, to reject a destination that would break the XML while the
+# directory is still in place, and once for real afterwards. Tests that need
+# the *post-move* call to fail therefore let the first call succeed by giving
+# it an empty result, and raise on the second.
+PREFLIGHT_OK: dict[str, int] = {}
 
 
 class TestParser(unittest.TestCase):
@@ -79,6 +88,52 @@ class TestRunMigration(MigrationTestCase):
         output = buffer.getvalue()
         self.assertRegex(output, r"Dry run: [1-9]\d* files would be modified")
 
+    def test_dry_run_names_the_files_that_would_change(self):
+        """The plan has to say which configuration files it would touch.
+
+        A count alone gives the user nothing to check. Naming the files and
+        the number of references in each is what makes a dry run reviewable
+        before a real run is authorised.
+        """
+        args = build_parser().parse_args(
+            ["--source", str(self.source), "--dest", str(self.dest), "--dry-run", "--yes"]
+        )
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            code = run_migration(args, self.home, NOW, ps_output=QUIET)
+        self.assertEqual(code, 0)
+        output = buffer.getvalue()
+        self.assertIn(str(self.config_file), output)
+        self.assertRegex(output, re.escape(str(self.config_file)) + r"\s+\(1 reference\)")
+
+    def test_destination_that_would_break_the_xml_fails_before_anything_moves(self):
+        """An XML-hostile destination must be refused before the move, not after.
+
+        A destination whose name contains "&" cannot be written into an XML
+        attribute as it stands, so the rewrite would refuse it. Discovering
+        that only after the directory has been copied means the user waits out
+        a multi-gigabyte move to be told it was never going to work, and is
+        then left with the directory sitting in its new location while the
+        IDEs still point at the old one.
+        """
+        hostile_dest = self.home / "Projects" / "R&D"
+        args = build_parser().parse_args(
+            ["--source", str(self.source), "--dest", str(hostile_dest), "--yes"]
+        )
+        original_bytes = self.config_file.read_bytes()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
+            code = run_migration(args, self.home, NOW, ps_output=QUIET)
+
+        self.assertEqual(code, 1)
+        self.assertIn("invalid XML", stderr.getvalue())
+        # Nothing moved, and no configuration file was written.
+        self.assertTrue(self.source.is_dir())
+        self.assertFalse(hostile_dest.exists())
+        self.assertEqual(self.config_file.read_bytes(), original_bytes)
+        # No recovery advice, because there is nothing to recover from.
+        self.assertNotIn("failed partway through", stderr.getvalue())
+
     def test_apply_moves_rewrites_and_backs_up(self):
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
@@ -141,7 +196,7 @@ class TestRunMigration(MigrationTestCase):
         with (
             patch(
                 "idea_migrate.cli.rewrite_products",
-                side_effect=XmlIntegrityError("would have produced invalid XML"),
+                side_effect=[PREFLIGHT_OK, XmlIntegrityError("would have produced invalid XML")],
             ),
             redirect_stderr(stderr),
             redirect_stdout(io.StringIO()),
@@ -168,7 +223,7 @@ class TestRunMigration(MigrationTestCase):
         with (
             patch(
                 "idea_migrate.cli.rewrite_products",
-                side_effect=KeyboardInterrupt(),
+                side_effect=[PREFLIGHT_OK, KeyboardInterrupt()],
             ),
             redirect_stderr(stderr),
             redirect_stdout(io.StringIO()),
@@ -195,7 +250,7 @@ class TestRunMigration(MigrationTestCase):
         with (
             patch(
                 "idea_migrate.cli.rewrite_products",
-                side_effect=RuntimeError("unexpected bug"),
+                side_effect=[PREFLIGHT_OK, RuntimeError("unexpected bug")],
             ),
             redirect_stderr(stderr),
             redirect_stdout(io.StringIO()),

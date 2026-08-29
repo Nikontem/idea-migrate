@@ -41,6 +41,7 @@ class UndoTestCase(unittest.TestCase):
                 tool_version="0.1.0",
                 created_at="2026-08-29T14:30:05",
                 home=str(self.home),
+                jetbrains_root=str(self.jetbrains),
                 source=str(self.source),
                 dest=str(self.dest),
                 move_status="moved",

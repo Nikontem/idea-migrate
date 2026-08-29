@@ -18,6 +18,7 @@ def make_backup(root: Path, stamp: str, undone: str | None = None) -> Path:
             tool_version="0.1.0",
             created_at=stamp,
             home="/Users/tester",
+            jetbrains_root="/Users/tester/Library/Application Support/JetBrains",
             source="/Users/tester/WebstormProjects",
             dest="/Users/tester/Projects/WebstormProjects",
             move_status="moved",

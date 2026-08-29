@@ -89,6 +89,48 @@ class TestMoveDirectoryCrossDevice(unittest.TestCase):
         self.assertTrue(moved_link.is_symlink())
         self.assertEqual(os.readlink(moved_link), original_link_target)
 
+    def test_copy_failure_names_the_partial_destination_and_keeps_the_source(self):
+        """A failed copy must say the orphan exists and has to be deleted.
+
+        shutil.copytree does not stop at the first unreadable file: it copies
+        what it can and raises one shutil.Error at the end listing every
+        failure. The half-written destination is left on disk, and a retry
+        would be refused because that destination now exists - so the error
+        has to name it and say to delete it, and it must not drown that
+        instruction in one line per failed file.
+        """
+        real_copytree = shutil.copytree
+
+        def _copy_some_then_fail(src, dst, **kwargs):
+            with mock.patch.object(shutil, "copytree", real_copytree):
+                real_copytree(src, dst, **kwargs)
+            # What copytree itself raises after collecting per-file errors:
+            # one (source, destination, reason) triple per file it gave up on.
+            raise shutil.Error(
+                [
+                    (f"{src}/file{index}", f"{dst}/file{index}", "Permission denied")
+                    for index in range(20)
+                ]
+            )
+
+        with mock.patch("shutil.copytree", side_effect=_copy_some_then_fail):
+            with self.assertRaises(MoveError) as ctx:
+                move_directory(self._spec())
+
+        message = str(ctx.exception)
+        self.assertIn(str(self.dest), message)
+        self.assertIn("delete", message.lower())
+        # The 20 collected failures are summarised, not listed one per line.
+        self.assertLessEqual(message.count("Permission denied"), 3)
+        self.assertIn("more file", message)
+
+        # The source is the only good copy and must be untouched.
+        self.assertTrue(self.source.is_dir())
+        self.assertEqual(
+            (self.source / "alpha" / "file.txt").read_text(encoding="utf-8"),
+            "hello",
+        )
+
     def test_verification_failure_raises_and_leaves_source_and_partial_dest(self):
         real_copytree = shutil.copytree
 

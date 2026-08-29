@@ -124,7 +124,17 @@ backup_root = "~/.local/share/idea-backups"
 
 # Optional: which products to skip. Useful if you have a product you never open
 # or one that stores problematic references you do not want to touch.
-exclude_products = ["GoLand", "RustRover"]
+#
+# Each entry must be the FULL directory name as it appears under the JetBrains
+# settings directory, which includes the version. "GoLand" on its own matches
+# nothing, because the directory is called "GoLand2026.2".
+exclude_products = ["GoLand2026.2", "RustRover2026.1"]
+```
+
+To see the exact names to use, list the settings directory:
+
+```bash
+ls ~/Library/"Application Support"/JetBrains
 ```
 
 All paths support `~` expansion. Keys not present in the file use their defaults.

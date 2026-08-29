@@ -54,6 +54,32 @@ def _tree_snapshot(root: Path) -> dict[str, tuple[str, object]]:
     return snapshot
 
 
+def _describe_copy_failure(exc: OSError, limit: int = 3) -> str:
+    """Summarise why a copy failed, without printing one line per file.
+
+    ``shutil.copytree`` does not stop at the first problem: it carries on and
+    raises a single ``shutil.Error`` at the end holding one entry for every
+    file it could not copy. On a large tree that is thousands of lines, which
+    buries the part the user has to act on, so only the first few are shown
+    and the rest are counted.
+    """
+    collected = exc.args[0] if isinstance(exc, shutil.Error) and exc.args else None
+    if not isinstance(collected, list) or not collected:
+        return str(exc)
+
+    shown: list[str] = []
+    for entry in collected[:limit]:
+        if isinstance(entry, tuple) and len(entry) == 3:
+            source, _destination, reason = entry
+            shown.append(f"{source}: {reason}")
+        else:
+            shown.append(str(entry))
+    remaining = len(collected) - limit
+    if remaining > 0:
+        shown.append(f"and {remaining} more file(s)")
+    return "First errors: " + "; ".join(shown) + "."
+
+
 def move_directory(spec: MoveSpec) -> None:
     """Move the source directory to the destination."""
     if spec.same_device:
@@ -61,7 +87,19 @@ def move_directory(spec: MoveSpec) -> None:
         return
 
     before = _tree_snapshot(spec.source)
-    shutil.copytree(spec.source, spec.dest, symlinks=True)
+    try:
+        shutil.copytree(spec.source, spec.dest, symlinks=True)
+    except OSError as exc:
+        # shutil.Error is a subclass of OSError, so this covers both the
+        # per-file collection copytree raises at the end and an outright
+        # failure such as a full disk.
+        raise MoveError(
+            f"Copying {spec.source} to {spec.dest} failed. Nothing was "
+            f"deleted, so the source at {spec.source} is still intact and "
+            f"complete. A partial copy was left at {spec.dest}: delete it "
+            "before retrying, or the retry will stop because the destination "
+            f"already exists. {_describe_copy_failure(exc)}"
+        ) from exc
     after = _tree_snapshot(spec.dest)
 
     if before != after:

@@ -23,6 +23,10 @@ class Manifest:
     tool_version: str
     created_at: str
     home: str
+    # Where the IDEs keep their settings. Recorded rather than assumed,
+    # because the configuration file can point it somewhere else and both undo
+    # routes have to restore into the directory the backup was taken from.
+    jetbrains_root: str
     source: str
     dest: str
     move_status: str
@@ -68,11 +72,22 @@ def write_manifest(backup_dir: Path, manifest: Manifest) -> Path:
 
 
 def read_manifest(backup_dir: Path) -> Manifest:
-    """Read the manifest from a backup directory."""
+    """Read the manifest from a backup directory.
+
+    A manifest written by an older version may not carry every field; those
+    are filled in with the value that version implied, so an old backup stays
+    undoable.
+    """
     target = backup_dir / MANIFEST_NAME
     if not target.is_file():
         raise FileNotFoundError(f"No {MANIFEST_NAME} in {backup_dir}")
     data = json.loads(target.read_text(encoding="utf-8"))
+    # Manifests written before jetbrains_root was recorded fall back to the
+    # default location, which is where those runs necessarily backed up from.
+    data.setdefault(
+        "jetbrains_root",
+        str(Path(data["home"]) / "Library" / "Application Support" / "JetBrains"),
+    )
     return Manifest(**data)
 
 

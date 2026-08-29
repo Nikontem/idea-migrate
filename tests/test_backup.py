@@ -1,4 +1,5 @@
 import itertools
+import json
 import os
 import stat
 import subprocess
@@ -143,16 +144,18 @@ class TestUndoScriptBehavior(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def _build_scenario(self, *, create_dest=True, create_source=False):
+    def _build_scenario(
+        self, *, create_dest=True, create_source=False, jetbrains_root=None
+    ):
         home = self.tmp / "home"
-        options_dir = (
-            home
-            / "Library"
-            / "Application Support"
-            / "JetBrains"
-            / self.PRODUCT
-            / "options"
+        # Where the IDEs keep their settings. Defaults to the standard
+        # location under the fake home; a test that overrides it is checking
+        # that the script restores where the manifest says, not where the
+        # default would have put it.
+        jetbrains_root = jetbrains_root or (
+            home / "Library" / "Application Support" / "JetBrains"
         )
+        options_dir = jetbrains_root / self.PRODUCT / "options"
         options_dir.mkdir(parents=True)
         options_file = options_dir / "settings.xml"
         options_file.write_text(self.POST_MIGRATION_TEXT, encoding="utf-8")
@@ -184,6 +187,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
             tool_version="test",
             created_at="2026-08-29T14:30:05",
             home=str(home),
+            jetbrains_root=str(jetbrains_root),
             source=str(source),
             dest=str(dest),
             move_status="moved",
@@ -334,6 +338,47 @@ class TestUndoScriptBehavior(unittest.TestCase):
         self.assertEqual(
             scenario["options_file"].read_text(encoding="utf-8"),
             self.POST_MIGRATION_TEXT,
+        )
+
+    def test_restores_into_the_configured_jetbrains_root(self):
+        """A non-default settings directory must be restored, not recreated.
+
+        The tool's configuration file can point jetbrains_root somewhere other
+        than "~/Library/Application Support/JetBrains", and the Python undo
+        already honours it. A script that assumed the default would create an
+        empty settings tree in the wrong place, restore into it, and report
+        success while the settings the user actually uses stayed broken.
+        """
+        custom_root = self.tmp / "custom-jetbrains"
+        scenario = self._build_scenario(create_dest=True, jetbrains_root=custom_root)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+
+        result = self._run_script(scenario["script"], stub)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            scenario["options_file"].read_text(encoding="utf-8"),
+            self.PRE_MIGRATION_TEXT,
+        )
+        # Nothing was invented at the default location.
+        default_root = scenario["home"] / "Library" / "Application Support" / "JetBrains"
+        self.assertFalse(default_root.exists())
+
+    def test_manifest_without_a_jetbrains_root_falls_back_to_the_default(self):
+        """An older backup, written before the field existed, still restores."""
+        scenario = self._build_scenario(create_dest=True)
+        manifest_path = scenario["backup_dir"] / "manifest.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del data["jetbrains_root"]
+        manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+
+        result = self._run_script(scenario["script"], stub)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            scenario["options_file"].read_text(encoding="utf-8"),
+            self.PRE_MIGRATION_TEXT,
         )
 
     def test_jetbrains_toolbox_alone_does_not_block_the_undo(self):

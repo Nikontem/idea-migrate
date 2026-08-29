@@ -213,6 +213,7 @@ def sample_manifest() -> Manifest:
         tool_version="0.1.0",
         created_at="2026-08-29T14:30:05",
         home="/Users/tester",
+        jetbrains_root="/Users/tester/Library/Application Support/JetBrains",
         source="/Users/tester/WebstormProjects",
         dest="/Users/tester/Projects/WebstormProjects",
         move_status="moved",
