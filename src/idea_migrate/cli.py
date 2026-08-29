@@ -92,6 +92,22 @@ def _find_hardcoded_paths(root: Path, home: Path) -> list[str]:
     return sorted(warnings)
 
 
+def _progress(message: str) -> None:
+    """Announce a phase that takes a while, on stderr.
+
+    A migration can move tens of gigabytes, back up a dozen products and walk
+    a large project tree, and until now it did all of that in silence. Silence
+    immediately after the riskiest step is exactly when a user reaches for
+    Ctrl-C, so each long phase says what it is starting.
+
+    These go to stderr so the report on stdout stays clean for anyone piping
+    or redirecting it. There is deliberately no progress bar: the work is not
+    divided into countable units of predictable size, so a bar would be a
+    guess dressed up as a measurement.
+    """
+    print(message, file=sys.stderr)
+
+
 def _print_recovery(backup_dir: Path) -> None:
     """Print how to recover when a migration failed after the move started.
 
@@ -161,6 +177,7 @@ def run_migration(
     backup_dir: Path | None = None
     try:
         backup_dir = new_backup_dir(config.backup_root, now)
+        _progress(f"Backing up settings for {len(products)} products...")
         backed_up = back_up_products(products, backup_dir)
         write_undo_script(backup_dir)
 
@@ -188,8 +205,10 @@ def run_migration(
         # a clear refusal and a wait of many minutes followed by one.
         rewrite_products(products, variants, dry_run=True)
 
+        _progress(f"Moving {spec.source} to {spec.dest}...")
         move_directory(spec)
         moved = True
+        _progress("Repairing path references in the IDE configuration...")
         rewritten = rewrite_products(products, variants)
         remaining = count_references(products, variants)
 
@@ -209,6 +228,7 @@ def run_migration(
             _print_recovery(backup_dir)
         raise
 
+    _progress("Scanning the moved projects for hardcoded paths...")
     warnings = _find_hardcoded_paths(spec.dest, spec.home)
     print(
         format_result(

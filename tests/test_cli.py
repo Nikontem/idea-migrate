@@ -74,7 +74,7 @@ class TestRunMigration(MigrationTestCase):
             ["--source", str(self.source), "--dest", str(self.dest), "--dry-run", "--yes"]
         )
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        with redirect_stdout(buffer), redirect_stderr(io.StringIO()):
             code = run_migration(args, self.home, NOW, ps_output=QUIET)
         self.assertEqual(code, 0)
         self.assertTrue(self.source.is_dir())
@@ -99,7 +99,7 @@ class TestRunMigration(MigrationTestCase):
             ["--source", str(self.source), "--dest", str(self.dest), "--dry-run", "--yes"]
         )
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        with redirect_stdout(buffer), redirect_stderr(io.StringIO()):
             code = run_migration(args, self.home, NOW, ps_output=QUIET)
         self.assertEqual(code, 0)
         output = buffer.getvalue()
@@ -139,7 +139,7 @@ class TestRunMigration(MigrationTestCase):
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
         )
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        with redirect_stdout(buffer), redirect_stderr(io.StringIO()):
             code = run_migration(args, self.home, NOW, ps_output=QUIET)
         self.assertEqual(code, 0)
         self.assertFalse(self.source.exists())
@@ -169,12 +169,42 @@ class TestRunMigration(MigrationTestCase):
         self.assertEqual(manifest["move_status"], "moved")
         self.assertTrue(manifest["rewritten_files"])
 
+    def test_each_long_phase_announces_itself_on_stderr(self):
+        """A long run must not be silent, and must not pollute the report.
+
+        Backing up a dozen products, moving the directory, repairing the
+        configuration and scanning the moved tree all take time with nothing
+        to show for it, and the scan runs immediately after the riskiest step.
+        Each phase says what it is starting, on stderr, so redirecting the
+        report on stdout still yields only the report.
+        """
+        args = build_parser().parse_args(
+            ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            code = run_migration(args, self.home, NOW, ps_output=QUIET)
+        self.assertEqual(code, 0)
+
+        progress = stderr.getvalue()
+        self.assertIn("Backing up", progress)
+        self.assertIn("Moving", progress)
+        self.assertIn("Repairing", progress)
+        self.assertIn("Scanning", progress)
+
+        # The report itself is unaffected: none of the progress lines leak
+        # into stdout, which a user may be piping.
+        report = stdout.getvalue()
+        self.assertNotIn("Backing up", report)
+        self.assertNotIn("Scanning", report)
+        self.assertIn("Migration complete", report)
+
     def test_output_ends_with_the_undo_command(self):
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
         )
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        with redirect_stdout(buffer), redirect_stderr(io.StringIO()):
             run_migration(args, self.home, NOW, ps_output=QUIET)
         self.assertIn("undo.sh", buffer.getvalue().rstrip().splitlines()[-1])
 
@@ -183,7 +213,7 @@ class TestRunMigration(MigrationTestCase):
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
         )
         buffer = io.StringIO()
-        with redirect_stdout(buffer):
+        with redirect_stdout(buffer), redirect_stderr(io.StringIO()):
             code = run_migration(args, self.home, NOW, ps_output=RUNNING)
         self.assertEqual(code, 1)
         self.assertTrue(self.source.is_dir())

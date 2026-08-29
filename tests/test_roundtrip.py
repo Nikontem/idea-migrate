@@ -18,7 +18,7 @@ import os
 import stat
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -141,7 +141,7 @@ class TestRoundTrip(unittest.TestCase):
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
         )
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             code = run_migration(args, self.home, NOW, ps_output=QUIET)
         self.assertEqual(code, 0)
 
@@ -158,7 +158,7 @@ class TestRoundTrip(unittest.TestCase):
         backups = sorted(self.backup_root.iterdir())
         self.assertEqual(len(backups), 1)
 
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             undo_backup(backups[0], self.jetbrains, LATER, ps_output=QUIET)
 
         after = snapshot(self.home, self.backup_root)
@@ -168,10 +168,10 @@ class TestRoundTrip(unittest.TestCase):
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
         )
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             run_migration(args, self.home, NOW, ps_output=QUIET)
         backup = sorted(self.backup_root.iterdir())[0]
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             undo_backup(backup, self.jetbrains, LATER, ps_output=QUIET)
         self.assertTrue(backup.is_dir())
         self.assertTrue((backup / "manifest.json").is_file())
@@ -190,7 +190,7 @@ class TestRoundTrip(unittest.TestCase):
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
         )
-        with redirect_stdout(io.StringIO()):
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             run_migration(args, self.home, NOW, ps_output=QUIET)
 
         new_path = "$USER_HOME$/Projects/WebstormProjects/alpha"
