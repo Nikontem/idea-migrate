@@ -3,12 +3,11 @@
 This is the highest-risk part of the tool, so four rules govern it.
 
 Boundary anchoring: a prefix matches only when the next character ends the path
-component - a separator, a quote, an angle bracket, a line break or tab, or end
-of string. Without this, moving "WebstormProjects" would also corrupt
-"WebstormProjectsArchive". The space character is deliberately NOT a boundary:
-spaces are legal inside macOS directory names, so accepting one would make
-"Projects" match the start of "Projects 2024" and silently break a reference to
-a directory the user never moved.
+component - a separator, a quote, an opening angle bracket, a line break or tab,
+or end of string. Without this, moving "WebstormProjects" would also corrupt
+"WebstormProjectsArchive". The space character and ">" are deliberately NOT
+boundaries, because both are legal inside macOS directory names; see the comment
+on _BOUNDARY for why "<" is safe where ">" is not.
 
 One pass: every prefix goes into a single alternation rather than a substitution
 each, so no byte can be rewritten twice by a later variant matching an earlier
@@ -44,9 +43,21 @@ logger = logging.getLogger(__name__)
 
 USER_HOME_MACRO = "$USER_HOME$"
 
-# The prefix must be followed by something that ends the path component. A
-# space is not in this set on purpose - see the module docstring.
-_BOUNDARY = r"""(?=[/"'<>\r\n\t]|$)"""
+# The prefix must be followed by something that ends the path component.
+# Two exclusions are deliberate and must not be "tidied" back in.
+#
+# A space is legal in a macOS directory name, so accepting one would make
+# "Projects" match the start of "Projects 2024".
+#
+# ">" looks like the partner of "<" but is not. XML requires "<" to be escaped,
+# so a raw "<" right after a path can only be markup and can never be a byte of
+# a filename. XML does not require ">" to be escaped, and ">" is legal in a
+# macOS filename, so "Projects>2024" would be corrupted. Nor does ">" buy
+# anything: a path can legitimately be followed by "/", a quote closing an
+# attribute value, "<" opening a closing tag, whitespace, or end of input -
+# comments end with "--", CDATA with "]]", processing instructions with "?" -
+# so nothing in XML ever puts ">" directly after a path.
+_BOUNDARY = r"""(?=[/"'<\r\n\t]|$)"""
 
 
 def _macro_form(path: Path, home: Path) -> str | None:

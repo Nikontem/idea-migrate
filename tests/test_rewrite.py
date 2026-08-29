@@ -86,6 +86,15 @@ class TestRewriteText(unittest.TestCase):
         self.assertEqual(result, text)
         self.assertEqual(count, 0)
 
+    def test_does_not_match_a_sibling_whose_next_character_is_a_greater_than(self):
+        # ">" is legal in a macOS filename and XML does not require it to be
+        # escaped, so it cannot end a path component. See _BOUNDARY.
+        variants = prefix_variants(HOME / "Projects", HOME / "Moved", HOME)
+        text = '<entry key="/Users/tester/Projects>2024/x">'
+        result, count = rewrite_text(text, variants)
+        self.assertEqual(result, text)
+        self.assertEqual(count, 0)
+
     def test_matches_a_different_capitalization(self):
         text = '<entry key="/Users/tester/webstormprojects/gamma">'
         result, count = rewrite_text(text, self.variants)
