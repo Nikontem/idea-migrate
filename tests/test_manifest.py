@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from idea_migrate.manifest import (
@@ -47,6 +48,28 @@ class TestManifestRoundTrip(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(FileNotFoundError):
                 read_manifest(Path(tmp))
+
+
+class TestWriteManifestIsAtomic(unittest.TestCase):
+    def test_overwrite_leaves_complete_file_and_no_leftover_temp_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            backup_dir = Path(tmp)
+            write_manifest(backup_dir, sample_manifest())
+
+            second = replace(
+                sample_manifest(),
+                dest="/Users/tester/Projects/OtherProject",
+                move_status="copied",
+            )
+            write_manifest(backup_dir, second)
+
+            data = json.loads((backup_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+            self.assertEqual(data["dest"], "/Users/tester/Projects/OtherProject")
+            self.assertEqual(data["move_status"], "copied")
+
+            self.assertEqual(
+                [entry.name for entry in backup_dir.iterdir()], [MANIFEST_NAME]
+            )
 
 
 class TestMarkUndone(unittest.TestCase):
