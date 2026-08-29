@@ -22,16 +22,22 @@ class Manifest:
     tool_version: str
     created_at: str
     home: str
-    # Where the IDEs keep their settings. Recorded rather than assumed,
-    # because the configuration file can point it somewhere else and both undo
-    # routes have to restore into the directory the backup was taken from.
-    jetbrains_root: str
     source: str
     dest: str
     move_status: str
     backed_up_products: list[str]
     rewritten_files: dict[str, int]
     undone_at: str | None
+    # Where the IDEs keep their settings. Recorded rather than assumed,
+    # because the configuration file can point it somewhere else and every
+    # undo route has to restore into the directory the backup was taken from.
+    #
+    # None means "this manifest does not say" - it was written before the
+    # field existed - and each undo route then applies its own fallback. It is
+    # left as None rather than filled in with a guess, because a caller that
+    # cannot tell a recorded value from an inferred one cannot decide whether
+    # to prefer it over its own configuration.
+    jetbrains_root: str | None = None
 
 
 def write_manifest(backup_dir: Path, manifest: Manifest) -> Path:
@@ -73,20 +79,13 @@ def write_manifest(backup_dir: Path, manifest: Manifest) -> Path:
 def read_manifest(backup_dir: Path) -> Manifest:
     """Read the manifest from a backup directory.
 
-    A manifest written by an older version may not carry every field; those
-    are filled in with the value that version implied, so an old backup stays
-    undoable.
+    A manifest written before ``jetbrains_root`` existed simply loads with
+    that field set to None, so an old backup stays readable and undoable.
     """
     target = backup_dir / MANIFEST_NAME
     if not target.is_file():
         raise FileNotFoundError(f"No {MANIFEST_NAME} in {backup_dir}")
     data = json.loads(target.read_text(encoding="utf-8"))
-    # Manifests written before jetbrains_root was recorded fall back to the
-    # default location, which is where those runs necessarily backed up from.
-    data.setdefault(
-        "jetbrains_root",
-        str(Path(data["home"]) / "Library" / "Application Support" / "JetBrains"),
-    )
     return Manifest(**data)
 
 

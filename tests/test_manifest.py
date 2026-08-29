@@ -52,13 +52,16 @@ class TestManifestRoundTrip(unittest.TestCase):
 
 
 class TestReadingAnOlderManifest(unittest.TestCase):
-    def test_missing_jetbrains_root_falls_back_to_the_default_location(self):
+    def test_missing_jetbrains_root_reads_as_not_recorded(self):
         """A backup written before the field existed must stay undoable.
 
-        Those runs could only have used the default settings directory, so
-        that is the value filled in. Without this, reading such a manifest
-        raises and the backup becomes impossible to roll back through the
-        tool.
+        It loads with jetbrains_root as None, meaning "this manifest does not
+        say", rather than raising or being filled in with a guess. Each undo
+        route then applies its own fallback: the command chooses the
+        configured settings directory, the standalone script chooses the
+        default location. A value invented here would be indistinguishable
+        from a recorded one, and the command would prefer the guess over the
+        configuration the user actually passed.
         """
         with tempfile.TemporaryDirectory() as tmp:
             backup_dir = Path(tmp)
@@ -68,10 +71,7 @@ class TestReadingAnOlderManifest(unittest.TestCase):
             del data["jetbrains_root"]
             path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-            self.assertEqual(
-                read_manifest(backup_dir).jetbrains_root,
-                "/Users/tester/Library/Application Support/JetBrains",
-            )
+            self.assertIsNone(read_manifest(backup_dir).jetbrains_root)
 
 
 class TestWriteManifestIsAtomic(unittest.TestCase):

@@ -64,8 +64,20 @@ if [ -n "$UNDONE_AT" ]; then
 fi
 
 # Only the IDE executables themselves count as "running". The pattern matches
-# an executable basename at the end of a path, which mirrors the IDE_EXECUTABLES
+# an executable basename at the end of a path, mirroring the IDE_EXECUTABLES
 # list in the tool's processes.py so the script and the tool agree.
+#
+# It has to be `ps -Ao comm=`, not `pgrep -f`, and the difference is not
+# cosmetic. `ps -Ao comm=` prints one executable path per line with the
+# arguments stripped, which is exactly what processes.py reads, so anchoring
+# the basename with "$" means what it looks like it means. `pgrep -f` matches
+# the whole command line including arguments, so the same anchored pattern
+# would only ever match an IDE started with no arguments at all - and the
+# Toolbox shell shim launches IntelliJ as `idea /path/to/project`. The guard
+# would then stay silent while an IDE was running, let the rollback proceed,
+# and the IDE would flush its in-memory settings over the restored files when
+# it quit. That is a worse failure than refusing to run, and it is on the one
+# code path that exists for when something has already gone wrong.
 #
 # JetBrains Toolbox and the JetBrains daemon (jetbrainsd) are deliberately NOT
 # treated as IDEs. They are an installer/updater and a background helper that
@@ -73,8 +85,19 @@ fi
 # and matching them would block recovery on a machine where nothing is wrong.
 IDE_PATTERN='/(idea|pycharm|webstorm|goland|datagrip|clion|phpstorm|rubymine|rider|rustrover)$'
 
-if pgrep -f "$IDE_PATTERN" >/dev/null 2>&1; then
-  echo "A JetBrains IDE appears to be running." >&2
+# The match is captured and then tested, rather than written as
+# `if ps -Ao comm= | grep -Eqi ...`. Under `set -o pipefail` that shorter form
+# is actively unsafe: `grep -q` exits as soon as it matches, ps is still
+# writing (the table is around 48 KB against a 16 KB pipe buffer), ps dies of
+# SIGPIPE, and pipefail reports the pipeline as 141 even though grep matched.
+# The `if` then reads a running IDE as "nothing running" - the one wrong
+# answer that matters. Capturing the output makes grep drain ps first, and
+# `|| true` keeps a no-match, which is grep exit 1, from tripping `set -e`.
+RUNNING_IDES="$(ps -Ao comm= | grep -Ei "$IDE_PATTERN" || true)"
+
+if [ -n "$RUNNING_IDES" ]; then
+  echo "A JetBrains IDE appears to be running:" >&2
+  echo "$RUNNING_IDES" >&2
   echo "Quit it before undoing, or its settings will be overwritten on exit." >&2
   exit 1
 fi

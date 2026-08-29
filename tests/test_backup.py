@@ -120,20 +120,39 @@ class TestUndoScriptBehavior(unittest.TestCase):
     PRE_MIGRATION_TEXT = "PRE-MIGRATION"
     POST_MIGRATION_TEXT = "POST-MIGRATION"
 
-    # Fake process tables fed to the stubbed pgrep. NOTHING_RUNNING has no
-    # JetBrains process at all; IDE_RUNNING has IntelliJ IDEA itself, which
-    # must block an undo; TOOLBOX_RUNNING has only JetBrains Toolbox and the
-    # JetBrains background daemon, which must not.
-    NOTHING_RUNNING = ["/usr/sbin/cfprefsd", "/usr/libexec/secinitd"]
+    # Fake process tables. Each entry is one running process described the two
+    # ways the shell can ask about it: what `ps -Ao comm=` prints, which is the
+    # executable path with the arguments stripped, and what `pgrep -f` matches
+    # against, which is the whole command line. They differ for real processes,
+    # and that difference is the point - a fixture of bare executable paths
+    # cannot tell the two implementations apart.
+    #
+    # NOTHING_RUNNING has no JetBrains process at all. IDE_RUNNING has IntelliJ
+    # IDEA itself and must block an undo. TOOLBOX_RUNNING has only JetBrains
+    # Toolbox and the JetBrains background daemon and must not.
+    IDEA_EXECUTABLE = "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea"
+    JETBRAINSD = (
+        "/Users/tester/Library/Application Support/JetBrains/Daemon/bundles/"
+        "current/jetbrainsd.app/Contents/MacOS/jetbrainsd"
+    )
+    TOOLBOX = "/Applications/JetBrains Toolbox.app/Contents/MacOS/jetbrains-toolbox"
+
+    NOTHING_RUNNING = [
+        ("/usr/sbin/cfprefsd", "/usr/sbin/cfprefsd"),
+        ("/usr/libexec/secinitd", "/usr/libexec/secinitd"),
+    ]
     IDE_RUNNING = [
-        "/usr/sbin/cfprefsd",
-        "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea",
+        ("/usr/sbin/cfprefsd", "/usr/sbin/cfprefsd"),
+        # Opened from a terminal, which is how the Toolbox shim launches it:
+        # the project path arrives as an argument, so the command line does not
+        # end at the executable name even though comm does.
+        (IDEA_EXECUTABLE, f"{IDEA_EXECUTABLE} /Users/tester/project"),
     ]
     TOOLBOX_RUNNING = [
-        "/usr/sbin/cfprefsd",
-        "/Applications/JetBrains Toolbox.app/Contents/MacOS/jetbrains-toolbox",
-        "/Users/tester/Library/Application Support/JetBrains/Daemon/bundles/"
-        "current/jetbrainsd.app/Contents/MacOS/jetbrainsd",
+        ("/usr/sbin/cfprefsd", "/usr/sbin/cfprefsd"),
+        (TOOLBOX, TOOLBOX),
+        # The daemon really does run with an argument.
+        (JETBRAINSD, f"{JETBRAINSD} run"),
     ]
 
     def setUp(self):
@@ -207,25 +226,53 @@ class TestUndoScriptBehavior(unittest.TestCase):
             "options_file": options_file,
         }
 
-    def _stub_pgrep(self, processes):
-        """Put a fake ``pgrep`` on PATH that searches a fixed process table.
+    def _stub_process_tools(self, processes):
+        """Put a fake ``ps`` and a fake ``pgrep`` on PATH over one fixture.
 
         The real process table is never consulted, so these tests say nothing
-        about what happens to be running on the machine. The stub honours the
-        pattern it is given rather than returning a fixed answer, which is the
-        point: the script's own pattern is what decides whether the run is
-        blocked, and a stub that ignored it could not tell a real IDE apart
-        from JetBrains Toolbox.
+        about what happens to be running on the machine.
+
+        Both tools are stubbed from the same list of processes, each faithful
+        to what the real one reports: ``ps -Ao comm=`` prints executable paths
+        with arguments stripped, ``pgrep -f`` matches whole command lines. That
+        makes these tests independent of which tool the script happens to use,
+        and it is what lets them catch the difference between the two - a stub
+        that fed both tools the same bare executable paths would report that an
+        IDE launched with a project argument was not running.
+
+        Neither stub returns a fixed answer: both honour the pattern the script
+        supplies, because the script's own pattern is what decides whether a
+        rollback is blocked.
         """
         stub_dir = self.tmp / f"stub_bin_{next(self._stub_counter)}"
         stub_dir.mkdir()
-        table = stub_dir / "process_table"
-        table.write_text("".join(f"{line}\n" for line in processes), encoding="utf-8")
+
+        comm_table = stub_dir / "comm_table"
+        comm_table.write_text(
+            "".join(f"{comm}\n" for comm, _command in processes), encoding="utf-8"
+        )
+        command_table = stub_dir / "command_table"
+        command_table.write_text(
+            "".join(f"{command}\n" for _comm, command in processes), encoding="utf-8"
+        )
+
+        ps = stub_dir / "ps"
+        ps.write_text(
+            "#!/bin/sh\n"
+            "# Stands in for `ps -Ao comm=`: one executable path per line, no\n"
+            "# arguments. The flags are ignored; this fixture has only the one\n"
+            "# output format.\n"
+            f'exec cat "{comm_table}"\n',
+            encoding="utf-8",
+        )
+        ps.chmod(ps.stat().st_mode | stat.S_IXUSR)
+
         pgrep = stub_dir / "pgrep"
         pgrep.write_text(
             "#!/bin/sh\n"
-            "# Stands in for `pgrep -f PATTERN`: the pattern arrives as $2.\n"
-            f'exec grep -E "$2" "{table}" >/dev/null 2>&1\n',
+            "# Stands in for `pgrep -f PATTERN`: the pattern arrives as $2 and\n"
+            "# is matched against whole command lines, arguments included.\n"
+            f'exec grep -E "$2" "{command_table}" >/dev/null 2>&1\n',
             encoding="utf-8",
         )
         pgrep.chmod(pgrep.stat().st_mode | stat.S_IXUSR)
@@ -241,7 +288,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_happy_path_moves_dest_and_restores_config(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -255,7 +302,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_undone_at_is_stamped(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -265,7 +312,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_refuses_to_undo_twice(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         first = self._run_script(scenario["script"], stub)
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -280,7 +327,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_declines_when_source_already_exists(self):
         scenario = self._build_scenario(create_dest=True, create_source=True)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         self._run_script(scenario["script"], stub)
 
@@ -297,7 +344,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_declines_when_destination_is_missing(self):
         scenario = self._build_scenario(create_dest=False, create_source=False)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -310,7 +357,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_path_argument_works_from_a_different_working_directory(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
 
@@ -327,12 +374,23 @@ class TestUndoScriptBehavior(unittest.TestCase):
         )
 
     def test_refuses_when_an_ide_appears_to_be_running(self):
+        """A running IDE must stop the rollback, arguments or no arguments.
+
+        The IDE in this fixture was launched with a project path, which is what
+        the Toolbox shell shim does. A check written against whole command
+        lines cannot anchor on the executable name, so it sees nothing, allows
+        the rollback, and the IDE then writes its in-memory settings over the
+        restored files when it quits - silently undoing the undo.
+        """
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(self.IDE_RUNNING)
+        stub = self._stub_process_tools(self.IDE_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
         self.assertNotEqual(result.returncode, 0)
+        # It says which process it is refusing over, so the user knows what to
+        # quit rather than having to guess.
+        self.assertIn(self.IDEA_EXECUTABLE, result.stderr)
         self.assertTrue(scenario["dest"].is_dir())
         self.assertFalse(scenario["source"].exists())
         self.assertEqual(
@@ -351,7 +409,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
         """
         custom_root = self.tmp / "custom-jetbrains"
         scenario = self._build_scenario(create_dest=True, jetbrains_root=custom_root)
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -371,7 +429,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
         data = json.loads(manifest_path.read_text(encoding="utf-8"))
         del data["jetbrains_root"]
         manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        stub = self._stub_pgrep(self.NOTHING_RUNNING)
+        stub = self._stub_process_tools(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -392,7 +450,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
         very machines it is meant to rescue.
         """
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(self.TOOLBOX_RUNNING)
+        stub = self._stub_process_tools(self.TOOLBOX_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 

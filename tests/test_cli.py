@@ -131,6 +131,12 @@ class TestRunMigration(MigrationTestCase):
         self.assertTrue(self.source.is_dir())
         self.assertFalse(hostile_dest.exists())
         self.assertEqual(self.config_file.read_bytes(), original_bytes)
+        # And no backup either. The check runs before anything is created, so
+        # a run that never started leaves nothing behind - otherwise a
+        # "pending" backup would sit in the backups listing offering undo
+        # commands for a migration that did not happen, in a directory the
+        # tool promises never to clean up.
+        self.assertFalse((self.home / "Idea-Migration-Backups").exists())
         # No recovery advice, because there is nothing to recover from.
         self.assertNotIn("failed partway through", stderr.getvalue())
 
@@ -295,6 +301,105 @@ class TestRunMigration(MigrationTestCase):
         backups = list((self.home / "Idea-Migration-Backups").iterdir())
         self.assertEqual(len(backups), 1)
         self.assertIn(str(backups[0]), output)
+
+
+class TestUndoUsesTheRecordedSettingsRoot(unittest.TestCase):
+    """The undo command and undo.sh must agree on where to restore.
+
+    Both read the settings directory from the manifest, so a user who
+    migrated with a --config pointing jetbrains_root somewhere non-standard
+    does not have to remember that flag to undo. Before this, the script read
+    the recorded value while the command used whatever configuration happened
+    to be in effect, so the two disagreed and a forgotten --config restored
+    into the wrong directory while reporting success.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self._tmp.name).resolve()
+        self.custom_root = self.home / "custom-jetbrains"
+        self.product = self.custom_root / "WebStorm2026.2"
+        (self.product / "options").mkdir(parents=True)
+        (self.product / "options" / "recentProjects.xml").write_text(
+            '<application><entry key="$USER_HOME$/WebstormProjects/alpha" /></application>',
+            encoding="utf-8",
+        )
+
+        self.source = self.home / "WebstormProjects"
+        (self.source / "alpha").mkdir(parents=True)
+        (self.home / "Projects").mkdir()
+        self.dest = self.home / "Projects" / "WebstormProjects"
+
+        self.config_path = self.home / "config.toml"
+        self.config_path.write_text(
+            f'jetbrains_root = "{self.custom_root}"\n', encoding="utf-8"
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _migrate(self):
+        args = build_parser().parse_args(
+            [
+                "--config", str(self.config_path),
+                "--source", str(self.source),
+                "--dest", str(self.dest),
+                "--yes",
+            ]
+        )
+        with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.assertEqual(run_migration(args, self.home, NOW, ps_output=QUIET), 0)
+        backups = list((self.home / "Idea-Migration-Backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        return backups[0]
+
+    def test_undo_without_the_config_flag_still_restores_the_right_directory(self):
+        backup_dir = self._migrate()
+        config_file = self.product / "options" / "recentProjects.xml"
+        self.assertIn("Projects/WebstormProjects", config_file.read_text(encoding="utf-8"))
+
+        # Undo, deliberately without --config: the manifest is what decides.
+        with (
+            patch("idea_migrate.cli.Path.home", return_value=self.home),
+            patch("idea_migrate.undo.assert_no_ide_running"),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = main(["undo", str(backup_dir)])
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "$USER_HOME$/WebstormProjects/alpha",
+            config_file.read_text(encoding="utf-8"),
+        )
+        # Nothing was invented at the default location.
+        self.assertFalse(
+            (self.home / "Library" / "Application Support" / "JetBrains").exists()
+        )
+
+    def test_an_older_manifest_falls_back_to_the_configured_directory(self):
+        """With nothing recorded, the configuration is the best guess."""
+        backup_dir = self._migrate()
+        manifest_path = backup_dir / "manifest.json"
+        data = json.loads(manifest_path.read_text(encoding="utf-8"))
+        del data["jetbrains_root"]
+        manifest_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+        with (
+            patch("idea_migrate.cli.Path.home", return_value=self.home),
+            patch("idea_migrate.undo.assert_no_ide_running"),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            code = main(["--config", str(self.config_path), "undo", str(backup_dir)])
+
+        self.assertEqual(code, 0)
+        self.assertIn(
+            "$USER_HOME$/WebstormProjects/alpha",
+            (self.product / "options" / "recentProjects.xml").read_text(
+                encoding="utf-8"
+            ),
+        )
 
 
 class TestPromptForPathNonInteractive(unittest.TestCase):

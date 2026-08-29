@@ -28,10 +28,10 @@ from .backup import (
     write_undo_script,
 )
 from .completion import prompt_for_path
-from .config import load_config
+from .config import Config, load_config
 from .errors import MigrateError
 from .listing import find_backups, format_backups
-from .manifest import Manifest, write_manifest
+from .manifest import Manifest, read_manifest, write_manifest
 from .mover import assert_no_ide_running, move_directory
 from .paths import validate_move
 from .products import find_product_dirs
@@ -132,6 +132,31 @@ def _print_recovery(backup_dir: Path) -> None:
         print(line, file=sys.stderr)
 
 
+def _undo_settings_root(backup_dir: Path, config: Config) -> Path:
+    """Decide which settings directory an undo should restore into.
+
+    The manifest records where the backup was actually taken from, and that
+    wins. Someone who migrated with a --config pointing jetbrains_root at a
+    non-standard location should not have to remember the same flag to undo,
+    and restoring into the wrong directory would leave the settings they
+    actually use still broken while reporting success. The standalone undo.sh
+    reads the same recorded value, so both routes agree.
+
+    A manifest written before that field existed does not say, and the
+    configured value - the tool's own default unless --config says otherwise -
+    is the best available guess.
+
+    Reading the manifest here can fail: it may be missing or corrupt. That is
+    not diagnosed here, because undo_backup checks it a moment later and
+    reports it properly; the configured value simply stands in until then.
+    """
+    try:
+        recorded = read_manifest(backup_dir).jetbrains_root
+    except (OSError, ValueError, TypeError):
+        return config.jetbrains_root
+    return Path(recorded) if recorded else config.jetbrains_root
+
+
 def run_migration(
     args: argparse.Namespace,
     home: Path,
@@ -181,6 +206,19 @@ def run_migration(
     moved = False
     backup_dir: Path | None = None
     try:
+        # Preflight, before anything at all is created. A dry run performs
+        # exactly the validation the real rewrite does - every rewritten file
+        # is parsed to confirm it is still well-formed XML - and writes
+        # nothing. Running it here means a destination path carrying a
+        # character XML cannot hold raw, such as "&" or "<", is rejected while
+        # the directory is still in place, before a multi-gigabyte move rather
+        # than after it, and before a backup directory exists. Running it
+        # after the backup was created left a "pending" backup behind for a
+        # run that never started, which the backups listing then offered undo
+        # commands for - clutter in a directory the tool promises never to
+        # clean up.
+        rewrite_products(products, variants, dry_run=True)
+
         backup_dir = new_backup_dir(config.backup_root, now)
         _progress(f"Backing up settings for {len(products)} products...")
         backed_up = back_up_products(products, backup_dir)
@@ -200,15 +238,6 @@ def run_migration(
             undone_at=None,
         )
         write_manifest(backup_dir, manifest)
-
-        # Preflight. A dry run performs exactly the validation the real
-        # rewrite does - every rewritten file is parsed to confirm it is still
-        # well-formed XML - and writes nothing. Running it here means a
-        # destination path carrying a character XML cannot hold raw, such as
-        # "&" or "<", is rejected before the directory has been moved rather
-        # than after, which on a large project tree is the difference between
-        # a clear refusal and a wait of many minutes followed by one.
-        rewrite_products(products, variants, dry_run=True)
 
         _progress(f"Moving {spec.source} to {spec.dest}...")
         move_directory(spec)
@@ -266,7 +295,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "undo":
             config = load_config(Path(args.config) if args.config else None, home)
-            for line in undo_backup(Path(args.backup_dir), config.jetbrains_root, now):
+            backup_dir = Path(args.backup_dir)
+            for line in undo_backup(
+                backup_dir, _undo_settings_root(backup_dir, config), now
+            ):
                 print(line)
             return 0
         return run_migration(args, home, now)
