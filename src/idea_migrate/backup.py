@@ -55,8 +55,18 @@ if [ -n "$UNDONE_AT" ]; then
   exit 1
 fi
 
-if pgrep -f 'JetBrains|IntelliJ IDEA\.app|PyCharm\.app|WebStorm\.app|GoLand\.app|DataGrip\.app' >/dev/null 2>&1; then
-  echo "A JetBrains application appears to be running." >&2
+# Only the IDE executables themselves count as "running". The pattern matches
+# an executable basename at the end of a path, which mirrors the IDE_EXECUTABLES
+# list in the tool's processes.py so the script and the tool agree.
+#
+# JetBrains Toolbox and the JetBrains daemon (jetbrainsd) are deliberately NOT
+# treated as IDEs. They are an installer/updater and a background helper that
+# many people leave running permanently; neither holds IDE settings in memory,
+# and matching them would block recovery on a machine where nothing is wrong.
+IDE_PATTERN='/(idea|pycharm|webstorm|goland|datagrip|clion|phpstorm|rubymine|rider|rustrover)$'
+
+if pgrep -f "$IDE_PATTERN" >/dev/null 2>&1; then
+  echo "A JetBrains IDE appears to be running." >&2
   echo "Quit it before undoing, or its settings will be overwritten on exit." >&2
   exit 1
 fi

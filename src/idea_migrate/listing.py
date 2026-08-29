@@ -97,6 +97,9 @@ def format_backups(
             ]
         )
         if not manifest.undone_at:
-            lines.append(f"    undo:   {summary.directory / UNDO_SCRIPT_NAME}")
+            # Both routes are listed: the subcommand needs the tool installed
+            # and working, the script needs only bash and python3.
+            lines.append(f"    undo:   idea-migrate undo {summary.directory}")
+            lines.append(f"            {summary.directory / UNDO_SCRIPT_NAME}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"

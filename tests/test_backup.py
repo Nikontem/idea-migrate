@@ -1,3 +1,4 @@
+import itertools
 import os
 import stat
 import subprocess
@@ -118,9 +119,26 @@ class TestUndoScriptBehavior(unittest.TestCase):
     PRE_MIGRATION_TEXT = "PRE-MIGRATION"
     POST_MIGRATION_TEXT = "POST-MIGRATION"
 
+    # Fake process tables fed to the stubbed pgrep. NOTHING_RUNNING has no
+    # JetBrains process at all; IDE_RUNNING has IntelliJ IDEA itself, which
+    # must block an undo; TOOLBOX_RUNNING has only JetBrains Toolbox and the
+    # JetBrains background daemon, which must not.
+    NOTHING_RUNNING = ["/usr/sbin/cfprefsd", "/usr/libexec/secinitd"]
+    IDE_RUNNING = [
+        "/usr/sbin/cfprefsd",
+        "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea",
+    ]
+    TOOLBOX_RUNNING = [
+        "/usr/sbin/cfprefsd",
+        "/Applications/JetBrains Toolbox.app/Contents/MacOS/jetbrains-toolbox",
+        "/Users/tester/Library/Application Support/JetBrains/Daemon/bundles/"
+        "current/jetbrainsd.app/Contents/MacOS/jetbrainsd",
+    ]
+
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.tmp = Path(self._tmp.name)
+        self._stub_counter = itertools.count()
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -185,11 +203,27 @@ class TestUndoScriptBehavior(unittest.TestCase):
             "options_file": options_file,
         }
 
-    def _stub_pgrep(self, exit_code):
-        stub_dir = self.tmp / f"stub_bin_{exit_code}"
-        stub_dir.mkdir(exist_ok=True)
+    def _stub_pgrep(self, processes):
+        """Put a fake ``pgrep`` on PATH that searches a fixed process table.
+
+        The real process table is never consulted, so these tests say nothing
+        about what happens to be running on the machine. The stub honours the
+        pattern it is given rather than returning a fixed answer, which is the
+        point: the script's own pattern is what decides whether the run is
+        blocked, and a stub that ignored it could not tell a real IDE apart
+        from JetBrains Toolbox.
+        """
+        stub_dir = self.tmp / f"stub_bin_{next(self._stub_counter)}"
+        stub_dir.mkdir()
+        table = stub_dir / "process_table"
+        table.write_text("".join(f"{line}\n" for line in processes), encoding="utf-8")
         pgrep = stub_dir / "pgrep"
-        pgrep.write_text(f"#!/bin/sh\nexit {exit_code}\n", encoding="utf-8")
+        pgrep.write_text(
+            "#!/bin/sh\n"
+            "# Stands in for `pgrep -f PATTERN`: the pattern arrives as $2.\n"
+            f'exec grep -E "$2" "{table}" >/dev/null 2>&1\n',
+            encoding="utf-8",
+        )
         pgrep.chmod(pgrep.stat().st_mode | stat.S_IXUSR)
         return stub_dir
 
@@ -203,7 +237,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_happy_path_moves_dest_and_restores_config(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(exit_code=1)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -217,7 +251,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_undone_at_is_stamped(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(exit_code=1)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -227,7 +261,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_refuses_to_undo_twice(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(exit_code=1)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
 
         first = self._run_script(scenario["script"], stub)
         self.assertEqual(first.returncode, 0, first.stderr)
@@ -242,7 +276,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_declines_when_source_already_exists(self):
         scenario = self._build_scenario(create_dest=True, create_source=True)
-        stub = self._stub_pgrep(exit_code=1)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
 
         self._run_script(scenario["script"], stub)
 
@@ -259,7 +293,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_declines_when_destination_is_missing(self):
         scenario = self._build_scenario(create_dest=False, create_source=False)
-        stub = self._stub_pgrep(exit_code=1)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -272,7 +306,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_path_argument_works_from_a_different_working_directory(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(exit_code=1)
+        stub = self._stub_pgrep(self.NOTHING_RUNNING)
         elsewhere = self.tmp / "elsewhere"
         elsewhere.mkdir()
 
@@ -290,7 +324,7 @@ class TestUndoScriptBehavior(unittest.TestCase):
 
     def test_refuses_when_an_ide_appears_to_be_running(self):
         scenario = self._build_scenario(create_dest=True)
-        stub = self._stub_pgrep(exit_code=0)
+        stub = self._stub_pgrep(self.IDE_RUNNING)
 
         result = self._run_script(scenario["script"], stub)
 
@@ -300,6 +334,29 @@ class TestUndoScriptBehavior(unittest.TestCase):
         self.assertEqual(
             scenario["options_file"].read_text(encoding="utf-8"),
             self.POST_MIGRATION_TEXT,
+        )
+
+    def test_jetbrains_toolbox_alone_does_not_block_the_undo(self):
+        """Toolbox is not an IDE, and must not stand between a user and undo.
+
+        JetBrains Toolbox and the JetBrains daemon start themselves at login
+        and are running on a normal machine essentially all the time. Neither
+        holds IDE settings in memory, so neither can overwrite what the undo
+        restores. A pattern loose enough to match them would make undo.sh -
+        the recovery route the tool advertises - refuse to do anything on the
+        very machines it is meant to rescue.
+        """
+        scenario = self._build_scenario(create_dest=True)
+        stub = self._stub_pgrep(self.TOOLBOX_RUNNING)
+
+        result = self._run_script(scenario["script"], stub)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(scenario["source"].is_dir())
+        self.assertFalse(scenario["dest"].exists())
+        self.assertEqual(
+            scenario["options_file"].read_text(encoding="utf-8"),
+            self.PRE_MIGRATION_TEXT,
         )
 
 

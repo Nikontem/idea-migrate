@@ -104,7 +104,9 @@ def _print_recovery(backup_dir: Path) -> None:
         "",
         "The migration failed partway through. A backup was taken before any "
         "change was made, and the directory may already have been moved.",
-        f"To restore the previous state, run: {backup_dir / 'undo.sh'}",
+        "To restore the previous state, run either of these:",
+        f"  idea-migrate undo {backup_dir}",
+        f"  {backup_dir / 'undo.sh'}",
     ]:
         print(line, file=sys.stderr)
 

@@ -52,6 +52,28 @@ class TestPrefixVariants(unittest.TestCase):
         self.assertEqual(variants["/opt/work"], "/opt/moved")
         self.assertEqual(variants["file:///opt/work"], "file:///opt/moved")
 
+    def test_destination_outside_home_keeps_the_placeholder_form_of_the_source(self):
+        """Moving out of the home directory must still find the stored form.
+
+        JetBrains writes a project that lives under the home directory as
+        "$USER_HOME$/IdeaProjects/...", so that spelling is the one actually
+        on disk. When the destination is on an external volume it has no
+        "$USER_HOME$" spelling of its own, but the source still does, and it
+        has to be paired with the destination's plain absolute path. Dropping
+        the pair entirely would mean the search never looks for the form the
+        references are really written in.
+        """
+        source = Path("/Users/tester/IdeaProjects")
+        destination = Path("/Volumes/Ext/IdeaProjects")
+        variants = prefix_variants(source, destination, HOME)
+        self.assertIn(
+            ("$USER_HOME$/IdeaProjects", "/Volumes/Ext/IdeaProjects"), variants
+        )
+        self.assertIn(
+            ("file://$USER_HOME$/IdeaProjects", "file:///Volumes/Ext/IdeaProjects"),
+            variants,
+        )
+
 
 class TestRewriteText(unittest.TestCase):
     def setUp(self):
@@ -116,6 +138,25 @@ class TestRewriteText(unittest.TestCase):
         result, count = rewrite_text(text, self.variants)
         self.assertEqual(result, text)
         self.assertEqual(count, 0)
+
+    def test_placeholder_entry_is_rewritten_when_moving_outside_the_home(self):
+        """A move onto an external volume must repair the placeholder form.
+
+        The reference on disk is written as "$USER_HOME$/IdeaProjects/alpha".
+        The destination is outside the home directory, so its replacement is
+        the plain absolute path. If this rewrite does not happen the tool
+        reports success while every Recent Projects entry still points at a
+        directory that has been emptied.
+        """
+        variants = prefix_variants(
+            Path("/Users/tester/IdeaProjects"),
+            Path("/Volumes/Ext/IdeaProjects"),
+            HOME,
+        )
+        text = '<entry key="$USER_HOME$/IdeaProjects/alpha">'
+        result, count = rewrite_text(text, variants)
+        self.assertEqual(result, '<entry key="/Volumes/Ext/IdeaProjects/alpha">')
+        self.assertEqual(count, 1)
 
     def test_matches_bare_path_in_a_text_node_before_a_newline(self):
         text = "<a>$USER_HOME$/WebstormProjects\n</a>"

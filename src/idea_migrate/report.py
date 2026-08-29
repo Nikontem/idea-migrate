@@ -1,8 +1,12 @@
 """Format what the tool is about to do, and what it did.
 
-The result report ends with the backup location and the undo command for this
-run. That placement is deliberate: it is the thing the user needs when something
-has gone wrong, so it must not be buried in the middle of a wall of output.
+The result report ends with the backup location and both undo routes for this
+run - the ``idea-migrate undo`` subcommand and the standalone script in the
+backup directory. That placement is deliberate: it is the thing the user needs
+when something has gone wrong, so it must not be buried in the middle of a wall
+of output. Both routes are named because they fail in different ways: the
+subcommand needs the tool to still be installed and working, while the script
+needs only bash and python3.
 """
 
 from __future__ import annotations
@@ -71,7 +75,9 @@ def format_result(
             "",
             "-" * 72,
             f"Backup saved to: {backup_dir}",
-            "This backup is never deleted automatically. To reverse this migration:",
+            "This backup is never deleted automatically. To reverse this "
+            "migration, run either of these:",
+            f"  idea-migrate undo {backup_dir}",
             f"  {backup_dir / 'undo.sh'}",
         ]
     )

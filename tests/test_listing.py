@@ -110,6 +110,21 @@ class TestFormatBackups(unittest.TestCase):
             text = format_backups(find_backups(root), root)
             self.assertIn("undo:", text)
 
+    def test_active_backups_offer_both_recovery_routes(self):
+        """The listing must name the subcommand as well as the script.
+
+        `idea-migrate undo` needs the tool installed and working; the
+        standalone script needs only bash and python3. A user whose problem is
+        the tool itself needs the script, and a user who has forgotten where
+        the script is needs the subcommand.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup_dir = make_backup(root, "2026-08-29_100000")
+            text = format_backups(find_backups(root), root)
+            self.assertIn(f"idea-migrate undo {backup_dir}", text)
+            self.assertIn(str(backup_dir / "undo.sh"), text)
+
 
 if __name__ == "__main__":
     unittest.main()

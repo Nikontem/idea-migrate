@@ -86,13 +86,22 @@ def prefix_variants(old: Path, new: Path, home: Path) -> list[tuple[str, str]]:
 
     JetBrains writes paths in more than one form: absolute, relative to the
     ``$USER_HOME$`` placeholder, and as ``file://`` URLs of either.
+
+    When the source lives under the home directory its ``$USER_HOME$`` form is
+    the spelling actually written on disk, so that pair is always emitted -
+    even when the destination is somewhere the placeholder cannot express, such
+    as an external volume. In that case the placeholder form of the source is
+    paired with the destination's plain absolute path. Dropping the pair
+    instead would mean the search never looked for the form the references are
+    really stored in, and the tool would report a clean run over settings it
+    had not touched.
     """
     variants: list[tuple[str, str]] = [(old.as_posix(), new.as_posix())]
 
     old_macro = _macro_form(old, home)
     new_macro = _macro_form(new, home)
-    if old_macro and new_macro:
-        variants.append((old_macro, new_macro))
+    if old_macro:
+        variants.append((old_macro, new_macro or new.as_posix()))
 
     for old_form, new_form in list(variants):
         variants.append((f"file://{old_form}", f"file://{new_form}"))

@@ -28,6 +28,26 @@ class TestFormatResult(unittest.TestCase):
         self.assertIn("undo.sh", last)
         self.assertIn(str(BACKUP), last)
 
+    def test_both_recovery_routes_are_offered(self):
+        """The report must name the subcommand as well as the script.
+
+        The two routes fail differently: `idea-migrate undo` needs the tool
+        itself to still work, while the standalone script needs only bash and
+        python3. Naming only one leaves a user stuck whenever that one is the
+        route that is broken.
+        """
+        text = format_result(SOURCE, DEST, {"/a.xml": 3}, 0, [], BACKUP)
+        self.assertIn(f"idea-migrate undo {BACKUP}", text)
+        self.assertIn(str(BACKUP / "undo.sh"), text)
+
+    def test_recovery_commands_are_the_closing_lines(self):
+        """Recovery must not be buried in the middle of the output."""
+        text = format_result(SOURCE, DEST, {"/a.xml": 3}, 0, [], BACKUP)
+        lines = [line.strip() for line in text.rstrip().splitlines()]
+        self.assertIn(f"Backup saved to: {BACKUP}", lines)
+        self.assertEqual(lines[-2], f"idea-migrate undo {BACKUP}")
+        self.assertEqual(lines[-1], str(BACKUP / "undo.sh"))
+
     def test_backup_path_appears_near_the_end(self):
         text = format_result(SOURCE, DEST, {"/a.xml": 3}, 0, [], BACKUP)
         self.assertIn(str(BACKUP), text)
