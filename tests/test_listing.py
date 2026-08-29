@@ -1,9 +1,10 @@
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 
 from idea_migrate.listing import find_backups, format_backups
-from idea_migrate.manifest import Manifest, write_manifest
+from idea_migrate.manifest import MANIFEST_NAME, Manifest, write_manifest
 
 
 def make_backup(root: Path, stamp: str, undone: str | None = None) -> Path:
@@ -54,6 +55,22 @@ class TestFindBackups(unittest.TestCase):
             (root / "junk").mkdir()
             self.assertEqual(len(find_backups(root)), 1)
 
+    def test_corrupt_manifest_is_skipped_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_backup(root, "2026-08-29_100000")
+            corrupt_dir = root / "2026-08-28_100000"
+            corrupt_dir.mkdir()
+            (corrupt_dir / MANIFEST_NAME).write_text(
+                "{not valid json", encoding="utf-8"
+            )
+            with self.assertLogs("idea_migrate.listing", level="WARNING") as cm:
+                found = find_backups(root)
+            self.assertEqual([s.directory.name for s in found], ["2026-08-29_100000"])
+            self.assertTrue(
+                any("2026-08-28_100000" in message for message in cm.output)
+            )
+
 
 class TestFormatBackups(unittest.TestCase):
     def test_empty_listing_mentions_the_root(self):
@@ -70,6 +87,7 @@ class TestFormatBackups(unittest.TestCase):
             text = format_backups(find_backups(root), root)
             self.assertIn("WebstormProjects", text)
             self.assertIn("undo", text)
+            self.assertIn("undo:", text)
 
     def test_undone_backups_are_marked(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -77,6 +95,20 @@ class TestFormatBackups(unittest.TestCase):
             make_backup(root, "2026-08-29_100000", undone="2026-08-30T09:00:00")
             text = format_backups(find_backups(root), root)
             self.assertIn("rolled back", text.lower())
+
+    def test_undone_backups_do_not_offer_undo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_backup(root, "2026-08-29_100000", undone="2026-08-30T09:00:00")
+            text = format_backups(find_backups(root), root)
+            self.assertNotIn("undo:", text)
+
+    def test_active_backups_offer_undo(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_backup(root, "2026-08-29_100000")
+            text = format_backups(find_backups(root), root)
+            self.assertIn("undo:", text)
 
 
 if __name__ == "__main__":

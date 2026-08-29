@@ -6,11 +6,15 @@ stays correct without the tool keeping state anywhere else.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .backup import UNDO_SCRIPT_NAME
 from .manifest import MANIFEST_NAME, Manifest, read_manifest
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -37,7 +41,6 @@ def _human_size(num_bytes: int) -> str:
         if size < 1024 or unit == "GB":
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
-    return f"{size:.1f} GB"
 
 
 def find_backups(backup_root: Path) -> list[BackupSummary]:
@@ -51,7 +54,10 @@ def find_backups(backup_root: Path) -> list[BackupSummary]:
             continue
         try:
             manifest = read_manifest(entry)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError) as exc:
+            logger.warning(
+                "Skipping %s: its manifest could not be read (%s).", entry, exc
+            )
             continue
         summaries.append(
             BackupSummary(
@@ -91,6 +97,6 @@ def format_backups(
             ]
         )
         if not manifest.undone_at:
-            lines.append(f"    undo:   {summary.directory / 'undo.sh'}")
+            lines.append(f"    undo:   {summary.directory / UNDO_SCRIPT_NAME}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
