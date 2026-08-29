@@ -1,0 +1,30 @@
+<application>
+  <component name="RecentProjectsManager">
+    <option name="additionalInfo">
+      <map>
+        <entry key="$USER_HOME$/WebstormProjects/alpha">
+          <value>
+            <RecentProjectMetaInfo frameTitle="alpha" projectWorkspaceId="AAA">
+              <option name="binFolder" value="$APPLICATION_HOME_DIR$/bin" />
+            </RecentProjectMetaInfo>
+          </value>
+        </entry>
+        <entry key="$USER_HOME$/WebstormProjectsArchive/beta">
+          <value>
+            <RecentProjectMetaInfo frameTitle="beta" projectWorkspaceId="BBB" />
+          </value>
+        </entry>
+        <entry key="/Users/tester/webstormprojects/gamma">
+          <value>
+            <RecentProjectMetaInfo frameTitle="gamma" projectWorkspaceId="CCC" />
+          </value>
+        </entry>
+        <entry key="$USER_HOME$/Downloads/delta">
+          <value>
+            <RecentProjectMetaInfo frameTitle="delta" projectWorkspaceId="DDD" />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+</application>
