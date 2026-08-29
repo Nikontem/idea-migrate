@@ -24,7 +24,13 @@ def undo_backup(
     now: datetime,
     ps_output: str | None = None,
 ) -> list[str]:
-    """Reverse the run recorded in ``backup_dir``. Returns what was done."""
+    """Reverse the run recorded in ``backup_dir``. Returns what was done.
+
+    Settings are restored by overwriting the files captured in the backup;
+    any file an IDE created after the migration but before this undo is left
+    in place rather than deleted, so the restore is a merge, not a
+    byte-exact replacement of the settings directory.
+    """
     if not (backup_dir / MANIFEST_NAME).is_file():
         raise UndoError(f"No {MANIFEST_NAME} found in {backup_dir}")
 

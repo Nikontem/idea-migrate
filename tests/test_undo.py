@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 import unittest
 from datetime import datetime
@@ -89,6 +90,43 @@ class TestUndoBackup(UndoTestCase):
         undo_backup(self.backup_dir, self.jetbrains, NOW, ps_output=QUIET)
         self.assertTrue(self.backup_dir.is_dir())
         self.assertTrue((self.backup_dir / "manifest.json").is_file())
+
+    def test_declines_the_move_but_still_restores_settings_when_source_exists(self):
+        self.source.mkdir(parents=True)
+        (self.source / "already-here.txt").write_text(
+            "pre-existing", encoding="utf-8"
+        )
+
+        lines = undo_backup(self.backup_dir, self.jetbrains, NOW, ps_output=QUIET)
+
+        self.assertTrue(self.source.is_dir())
+        self.assertTrue(self.dest.is_dir())
+        self.assertEqual(
+            (self.source / "already-here.txt").read_text(encoding="utf-8"),
+            "pre-existing",
+        )
+        self.assertEqual(
+            (self.dest / "alpha.txt").read_text(encoding="utf-8"), "hello"
+        )
+        self.assertTrue(any("already exists" in line for line in lines))
+        restored = self.product / "options" / "recentProjects.xml"
+        self.assertEqual(restored.read_text(encoding="utf-8"), "BEFORE")
+
+    def test_declines_the_move_but_still_restores_settings_when_dest_missing(self):
+        shutil.rmtree(self.dest)
+
+        lines = undo_backup(self.backup_dir, self.jetbrains, NOW, ps_output=QUIET)
+
+        self.assertFalse(self.dest.exists())
+        self.assertFalse(self.source.exists())
+        self.assertTrue(self.backup_dir.is_dir())
+        self.assertTrue((self.backup_dir / "manifest.json").is_file())
+        self.assertTrue(
+            (self.backup_dir / "config" / "IntelliJIdea2026.2" / "options").is_dir()
+        )
+        self.assertTrue(any("not found" in line for line in lines))
+        restored = self.product / "options" / "recentProjects.xml"
+        self.assertEqual(restored.read_text(encoding="utf-8"), "BEFORE")
 
 
 if __name__ == "__main__":
