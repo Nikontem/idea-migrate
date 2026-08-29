@@ -16,6 +16,7 @@ import argparse
 import logging
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -65,19 +66,40 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _find_hardcoded_paths(root: Path, home: Path) -> list[str]:
-    """Return .idea files under ``root`` that contain absolute paths."""
+    """Return XML files under a ``.idea`` directory in ``root`` whose text
+    contains the literal ``home`` path.
+
+    This only flags references to the user's home directory specifically -
+    an absolute path elsewhere (such as ``/opt/sdk``) is not reported, and a
+    reference that happens to be spelled relative to home is. It is a best
+    effort scan run after a successful migration, so any error partway
+    through returns whatever was found so far rather than failing the run.
+    """
     warnings: list[str] = []
     needle = str(home)
-    for idea_dir in root.rglob(".idea"):
-        if not idea_dir.is_dir():
-            continue
-        for xml_file in idea_dir.rglob("*.xml"):
-            try:
-                if needle in xml_file.read_text(encoding="utf-8"):
-                    warnings.append(str(xml_file))
-            except (OSError, UnicodeDecodeError):
+    try:
+        for idea_dir in root.rglob(".idea"):
+            if not idea_dir.is_dir():
                 continue
+            for xml_file in idea_dir.rglob("*.xml"):
+                try:
+                    if needle in xml_file.read_text(encoding="utf-8"):
+                        warnings.append(str(xml_file))
+                except (OSError, UnicodeDecodeError):
+                    continue
+    except OSError:
+        pass
     return sorted(warnings)
+
+
+def _recovery_lines(backup_dir: Path) -> list[str]:
+    """Describe how to recover when a migration failed after the move started."""
+    return [
+        "",
+        "The migration failed partway through. A backup was taken before any "
+        "change was made, and the directory may already have been moved.",
+        f"To restore the previous state, run: {backup_dir / 'undo.sh'}",
+    ]
 
 
 def run_migration(
@@ -111,11 +133,17 @@ def run_migration(
         return 0
 
     if not args.yes:
-        answer = input("Proceed? [y/N] ").strip().lower()
+        try:
+            answer = input("Proceed? [y/N] ").strip().lower()
+        except EOFError:
+            print("Cancelled. Nothing was changed.")
+            return 0
         if answer not in ("y", "yes"):
             print("Cancelled. Nothing was changed.")
             return 0
 
+    moved = False
+    backup_dir: Path | None = None
     try:
         backup_dir = new_backup_dir(config.backup_root, now)
         backed_up = back_up_products(products, backup_dir)
@@ -136,26 +164,16 @@ def run_migration(
         write_manifest(backup_dir, manifest)
 
         move_directory(spec)
+        moved = True
         rewritten = rewrite_products(products, variants)
         remaining = count_references(products, variants)
 
-        write_manifest(
-            backup_dir,
-            Manifest(
-                version=manifest.version,
-                tool_version=manifest.tool_version,
-                created_at=manifest.created_at,
-                home=manifest.home,
-                source=manifest.source,
-                dest=manifest.dest,
-                move_status="moved",
-                backed_up_products=backed_up,
-                rewritten_files=rewritten,
-                undone_at=None,
-            ),
-        )
-    except MigrateError as exc:
+        write_manifest(backup_dir, replace(manifest, move_status="moved", rewritten_files=rewritten))
+    except (MigrateError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
+        if moved and backup_dir is not None:
+            for line in _recovery_lines(backup_dir):
+                print(line, file=sys.stderr)
         return 1
 
     warnings = _find_hardcoded_paths(spec.dest, spec.home)
@@ -171,6 +189,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     logging.basicConfig(level=logging.WARNING, format="warning: %(message)s")
 
     args = build_parser().parse_args(argv)
+
+    if args.dry_run and args.command in ("backups", "undo"):
+        print(
+            "error: --dry-run has no effect on the "
+            f"'{args.command}' subcommand and is not supported with it.",
+            file=sys.stderr,
+        )
+        return 1
+
     home = Path.home()
     now = datetime.now()
 
@@ -185,9 +212,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 print(line)
             return 0
         return run_migration(args, home, now)
-    except MigrateError as exc:
+    except (MigrateError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("Cancelled.", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":

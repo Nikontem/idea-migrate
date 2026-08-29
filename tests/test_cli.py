@@ -1,11 +1,14 @@
 import io
+import json
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 from idea_migrate.cli import build_parser, main, run_migration
+from idea_migrate.errors import XmlIntegrityError
 
 QUIET = "/usr/sbin/cfprefsd\n"
 RUNNING = "/Applications/IntelliJ IDEA.app/Contents/MacOS/idea\n"
@@ -45,7 +48,8 @@ class MigrationTestCase(unittest.TestCase):
         product = self.home / "Library" / "Application Support" / "JetBrains" / "WebStorm2026.2"
         (product / "options").mkdir(parents=True)
         (product / "workspace").mkdir(parents=True)
-        (product / "options" / "recentProjects.xml").write_text(
+        self.config_file = product / "options" / "recentProjects.xml"
+        self.config_file.write_text(
             '<application><entry key="$USER_HOME$/WebstormProjects/alpha" /></application>',
             encoding="utf-8",
         )
@@ -56,6 +60,7 @@ class MigrationTestCase(unittest.TestCase):
 
 class TestRunMigration(MigrationTestCase):
     def test_dry_run_changes_nothing(self):
+        original_bytes = self.config_file.read_bytes()
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--dry-run", "--yes"]
         )
@@ -66,6 +71,13 @@ class TestRunMigration(MigrationTestCase):
         self.assertTrue(self.source.is_dir())
         self.assertFalse(self.dest.exists())
         self.assertFalse((self.home / "Idea-Migration-Backups").exists())
+
+        # The one file rewrite_products(dry_run=True) actually opens must be
+        # byte-for-byte unchanged - not just "the destination doesn't exist".
+        self.assertEqual(self.config_file.read_bytes(), original_bytes)
+
+        output = buffer.getvalue()
+        self.assertRegex(output, r"Dry run: [1-9]\d* files would be modified")
 
     def test_apply_moves_rewrites_and_backs_up(self):
         args = build_parser().parse_args(
@@ -94,8 +106,13 @@ class TestRunMigration(MigrationTestCase):
 
         backups = list((self.home / "Idea-Migration-Backups").iterdir())
         self.assertEqual(len(backups), 1)
-        self.assertTrue((backups[0] / "manifest.json").is_file())
+        manifest_path = backups[0] / "manifest.json"
+        self.assertTrue(manifest_path.is_file())
         self.assertTrue((backups[0] / "undo.sh").is_file())
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(manifest["move_status"], "moved")
+        self.assertTrue(manifest["rewritten_files"])
 
     def test_output_ends_with_the_undo_command(self):
         args = build_parser().parse_args(
@@ -116,15 +133,56 @@ class TestRunMigration(MigrationTestCase):
         self.assertEqual(code, 1)
         self.assertTrue(self.source.is_dir())
 
+    def test_failure_after_the_move_still_reports_the_undo_command(self):
+        args = build_parser().parse_args(
+            ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
+        )
+        stderr = io.StringIO()
+        with (
+            patch(
+                "idea_migrate.cli.rewrite_products",
+                side_effect=XmlIntegrityError("would have produced invalid XML"),
+            ),
+            redirect_stderr(stderr),
+            redirect_stdout(io.StringIO()),
+        ):
+            code = run_migration(args, self.home, NOW, ps_output=QUIET)
+        self.assertEqual(code, 1)
+
+        # The move already happened - the source is gone - so the failure
+        # message must point at the recoverable backup, not just say "error".
+        self.assertFalse(self.source.exists())
+        self.assertTrue(self.dest.is_dir())
+
+        output = stderr.getvalue()
+        self.assertIn("undo.sh", output)
+        backups = list((self.home / "Idea-Migration-Backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertIn(str(backups[0]), output)
+
 
 class TestMainErrorHandling(unittest.TestCase):
     def test_invalid_path_prints_one_line_and_returns_one(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            dest = home / "somewhere" / "x"
+            stderr = io.StringIO()
+            with (
+                patch("idea_migrate.cli.Path.home", return_value=home),
+                redirect_stderr(stderr),
+                redirect_stdout(io.StringIO()),
+            ):
+                code = main(["--source", "/definitely/not/here", "--dest", str(dest), "--yes"])
+            self.assertEqual(code, 1)
+            self.assertIn("does not exist", stderr.getvalue())
+            self.assertNotIn("Traceback", stderr.getvalue())
+
+    def test_dry_run_is_rejected_on_subcommands(self):
         stderr = io.StringIO()
         with redirect_stderr(stderr), redirect_stdout(io.StringIO()):
-            code = main(["--source", "/definitely/not/here", "--dest", "/tmp/x", "--yes"])
+            code = main(["--dry-run", "backups"])
         self.assertEqual(code, 1)
-        self.assertIn("does not exist", stderr.getvalue())
-        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertIn("dry-run", stderr.getvalue())
 
 
 if __name__ == "__main__":
