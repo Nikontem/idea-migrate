@@ -38,11 +38,16 @@ def _same_dir(left: Path, right: Path) -> bool:
 def _is_inside(inner: Path, outer: Path) -> bool:
     """True when ``inner`` is at or below ``outer``.
 
-    ``inner`` need not exist. Each of its existing ancestors is compared against
-    ``outer`` with samefile, so a case-insensitive filesystem cannot hide a
-    match behind a different spelling.
+    ``inner`` need not exist. It is resolved with ``os.path.realpath`` before
+    the walk begins, which collapses ``..`` segments and follows symlinks along
+    whatever prefix of it does exist, leaving a non-existent tail alone. Walking
+    the typed spelling instead would be purely lexical, and containment reached
+    through a symlinked parent directory would go unnoticed. Each existing
+    ancestor of the resolved path is then compared against ``outer`` with
+    samefile, so a case-insensitive filesystem cannot hide a match behind a
+    different spelling either.
     """
-    candidate = inner
+    candidate = Path(os.path.realpath(inner))
     while True:
         if candidate.exists() and _same_dir(candidate, outer):
             return True
@@ -86,7 +91,10 @@ def validate_move(source: str | Path, dest: str | Path, home: Path) -> MoveSpec:
             f"Destination {dst} is inside the source {src}; "
             "a directory cannot be moved into itself."
         )
-    if dst.exists():
+    # is_symlink as well as exists: exists() follows the link, so a symlink
+    # whose target is gone reads as absent even though something really is
+    # sitting at that path and the move would fail on it.
+    if dst.exists() or dst.is_symlink():
         raise PathValidationError(f"Destination already exists: {dst}")
     if not dst.parent.is_dir():
         raise PathValidationError(
@@ -97,5 +105,8 @@ def validate_move(source: str | Path, dest: str | Path, home: Path) -> MoveSpec:
             f"Destination's parent directory is not writable: {dst.parent}"
         )
 
-    same_device = os.stat(src).st_dev == os.stat(dst.parent).st_dev
+    # lstat, not stat: if the source is itself a symlink, a rename moves the
+    # link entry, which lives on the device holding the link rather than the
+    # one holding whatever it points at.
+    same_device = os.lstat(src).st_dev == os.stat(dst.parent).st_dev
     return MoveSpec(source=src, dest=dst, home=home, same_device=same_device)
