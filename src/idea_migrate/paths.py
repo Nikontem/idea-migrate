@@ -23,8 +23,15 @@ class MoveSpec:
 
 
 def _absolute(value: str | Path) -> Path:
-    """Expand ``~`` and make the path absolute without requiring it to exist."""
-    return Path(os.path.expanduser(str(value))).absolute()
+    """Expand ``~``, make the path absolute, and collapse ``..`` lexically.
+
+    The path need not exist. Normalisation is lexical rather than via resolve(),
+    so a ".."-spelled path does not reach the config rewriter, while symlink
+    spellings are preserved - the IDEs recorded whatever spelling the user
+    opened the project under, and the rewrite matches on that stored text.
+    """
+    expanded = Path(os.path.expanduser(str(value))).absolute()
+    return Path(os.path.normpath(expanded))
 
 
 def _same_dir(left: Path, right: Path) -> bool:

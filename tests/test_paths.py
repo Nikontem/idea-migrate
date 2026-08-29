@@ -60,10 +60,16 @@ class TestValidMove(PathTestCase):
 
     def test_accepts_a_destination_spelled_with_dot_dot(self):
         # ".." is a legitimate way to name a sibling directory. The containment
-        # check must not read the climb through the source as containment.
+        # check must not read the climb through the source as containment, and
+        # the ".." must be collapsed rather than carried through: the recorded
+        # destination is later written into the IDE configuration files, where a
+        # literal ".." would be valid for the OS but wrong to anything reading
+        # it back.
         dest = self.source / ".." / "Projects" / "WebstormProjects"
         spec = validate_move(self.source, dest, self.home)
         self.assertIsInstance(spec, MoveSpec)
+        self.assertEqual(spec.dest, self.dest)
+        self.assertNotIn("..", str(spec.dest))
 
 
 class TestRejections(PathTestCase):
