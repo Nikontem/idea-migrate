@@ -26,5 +26,9 @@ class BackupError(MigrateError):
     """The backup could not be created."""
 
 
+class MoveError(MigrateError):
+    """The directory could not be moved, or the copy could not be verified."""
+
+
 class UndoError(MigrateError):
     """A backup could not be rolled back."""
