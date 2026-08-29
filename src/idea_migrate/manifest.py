@@ -6,6 +6,7 @@ listing, so nothing else in the tool has to keep state.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -38,19 +39,31 @@ def write_manifest(backup_dir: Path, manifest: Manifest) -> Path:
     leaves the previous manifest intact rather than a truncated one - this file
     is what undo and the backups listing depend on, so a torn write would break
     recovery exactly when it is needed.
+
+    If the write fails, the temporary file is removed before the error is
+    re-raised. The tool never deletes a backup directory, so anything left
+    there stays for good: a leaked temporary file would sit alongside the
+    manifest forever and inflate the size reported by the backups listing.
     """
     target = backup_dir / MANIFEST_NAME
     payload = json.dumps(asdict(manifest), indent=2, sort_keys=True) + "\n"
     handle = tempfile.NamedTemporaryFile(
         "w", encoding="utf-8", dir=backup_dir, delete=False
     )
+    temp_name = handle.name
     try:
-        handle.write(payload)
-        handle.flush()
-        os.fsync(handle.fileno())
-    finally:
-        handle.close()
-    os.replace(handle.name, target)
+        try:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            handle.close()
+        os.replace(temp_name, target)
+    except BaseException:
+        # Never leave a stray temporary file behind in the backup directory.
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name)
+        raise
     return target
 
 

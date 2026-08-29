@@ -286,18 +286,14 @@ class TestManifestSurvivesAFailedWrite(unittest.TestCase):
         write_manifest(self.backup_dir, self.replacement)
         self.assertEqual(read_manifest(self.backup_dir), self.replacement)
 
-    @unittest.expectedFailure
     def test_no_stray_temporary_file_is_left_behind(self):
-        """Known gap: a failed ``os.replace`` leaks its temporary file.
+        """A failed write cleans up after itself.
 
-        The manifest itself survives, so recovery still works - but the
-        temporary file stays in the backup directory forever, where it is dead
-        weight that inflates the size shown by ``idea-migrate backups``. The
-        fix is to wrap the ``os.replace`` call in ``write_manifest`` so an
-        ``OSError`` unlinks the temporary file before re-raising. This test is
-        marked as an expected failure so the suite stays green while the gap is
-        recorded; fixing ``manifest.py`` turns it into an unexpected success,
-        which fails the run and prompts whoever fixes it to drop the marker.
+        The manifest survives a failed write either way, so recovery works
+        regardless - but the tool never deletes a backup directory, so a
+        temporary file left there would stay for good, dead weight that
+        inflates the size shown by ``idea-migrate backups``. Nothing but the
+        manifest should remain.
         """
         with self.assertRaises(OSError):
             self._write_with_failing_replace()
