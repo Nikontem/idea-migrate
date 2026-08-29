@@ -46,8 +46,11 @@ class TestPrefixVariants(unittest.TestCase):
     def test_path_outside_home_has_no_placeholder_variant(self):
         outside = Path("/opt/work")
         variants = dict(prefix_variants(outside, Path("/opt/moved"), HOME))
-        self.assertNotIn("$USER_HOME$/opt/work", variants)
-        self.assertIn("/opt/work", variants)
+        # Only the absolute form and its file:// URL: a path outside the home
+        # directory has no $USER_HOME$ spelling at all.
+        self.assertEqual(len(variants), 2)
+        self.assertEqual(variants["/opt/work"], "/opt/moved")
+        self.assertEqual(variants["file:///opt/work"], "file:///opt/moved")
 
 
 class TestRewriteText(unittest.TestCase):
@@ -65,6 +68,21 @@ class TestRewriteText(unittest.TestCase):
     def test_does_not_match_longer_sibling_directory(self):
         text = '<entry key="$USER_HOME$/WebstormProjectsArchive/beta">'
         result, count = rewrite_text(text, self.variants)
+        self.assertEqual(result, text)
+        self.assertEqual(count, 0)
+
+    def test_does_not_match_a_sibling_whose_extra_word_follows_a_space(self):
+        # A space is legal inside a macOS directory name, so it must not end a
+        # path component: "WebstormProjects Archive" is a different directory.
+        text = '<entry key="$USER_HOME$/WebstormProjects Archive/beta">'
+        result, count = rewrite_text(text, self.variants)
+        self.assertEqual(result, text)
+        self.assertEqual(count, 0)
+
+    def test_does_not_match_a_sibling_that_is_a_spaced_suffix_of_the_source(self):
+        variants = prefix_variants(HOME / "Projects", HOME / "Moved", HOME)
+        text = '<entry key="/Users/tester/Projects 2024/x">'
+        result, count = rewrite_text(text, variants)
         self.assertEqual(result, text)
         self.assertEqual(count, 0)
 
@@ -109,8 +127,19 @@ class TestRewriteText(unittest.TestCase):
         odd_new = Path("/Users/tester/a\\1b")
         variants = prefix_variants(OLD, odd_new, HOME)
         text = '<entry key="/Users/tester/WebstormProjects/x">'
-        result, _ = rewrite_text(text, variants)
-        self.assertIn("a\\1b", result)
+        result, count = rewrite_text(text, variants)
+        self.assertEqual(result, '<entry key="/Users/tester/a\\1b/x">')
+        self.assertEqual(count, 1)
+
+    def test_case_folding_codepoint_does_not_crash(self):
+        # re.IGNORECASE treats a long s (U+017F) as equal to "s", but
+        # str.lower() does not, so selecting the replacement by lower-casing the
+        # matched text used to raise KeyError here.
+        variants = prefix_variants(HOME / "Assets", HOME / "Moved" / "Assets", HOME)
+        text = '<a k="/Users/tester/A\u017Fsets/x" />'
+        result, count = rewrite_text(text, variants)
+        self.assertEqual(result, '<a k="/Users/tester/Moved/Assets/x" />')
+        self.assertEqual(count, 1)
 
 
 class TestRewriteFile(unittest.TestCase):
@@ -141,13 +170,34 @@ class TestRewriteFile(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual(target.read_bytes(), before)
 
-    def test_already_malformed_file_is_skipped(self):
+    def test_already_malformed_file_is_skipped_with_a_warning(self):
         target = self.tmp / "malformed.xml"
         shutil.copy(FIXTURES / "malformed.xml", target)
         before = target.read_bytes()
-        count = rewrite_file(target, self.variants)
+        with self.assertLogs("idea_migrate.rewrite", level="WARNING") as captured:
+            count = rewrite_file(target, self.variants)
         self.assertEqual(count, 0)
         self.assertEqual(target.read_bytes(), before)
+        # A silent skip would be indistinguishable from a file with nothing to
+        # change, so the caller has to be told the file was left alone.
+        self.assertEqual(len(captured.output), 1)
+        self.assertIn("malformed.xml", captured.output[0])
+        self.assertIn("already not well-formed", captured.output[0])
+
+    def test_unreadable_file_is_skipped_with_a_warning(self):
+        target = self.tmp / "missing" / "gone.xml"
+        with self.assertLogs("idea_migrate.rewrite", level="WARNING") as captured:
+            count = rewrite_file(target, self.variants)
+        self.assertEqual(count, 0)
+        self.assertIn("could not be read", captured.output[0])
+
+    def test_non_utf8_file_is_skipped_with_a_warning(self):
+        target = self.tmp / "latin1.xml"
+        target.write_bytes(b'<a k="\xff\xfe/WebstormProjects" />')
+        with self.assertLogs("idea_migrate.rewrite", level="WARNING") as captured:
+            count = rewrite_file(target, self.variants)
+        self.assertEqual(count, 0)
+        self.assertIn("not valid UTF-8", captured.output[0])
 
     def test_rewrite_that_would_break_xml_raises(self):
         target = self.tmp / "recentProjects.xml"
@@ -157,6 +207,20 @@ class TestRewriteFile(unittest.TestCase):
         with self.assertRaises(XmlIntegrityError):
             rewrite_file(target, breaking)
         self.assertEqual(target.read_bytes(), before)
+
+    def test_crlf_line_endings_are_preserved(self):
+        target = self.tmp / "crlf.xml"
+        target.write_bytes(
+            b"<application>\r\n"
+            b'  <entry key="$USER_HOME$/WebstormProjects/alpha" />\r\n'
+            b"</application>\r\n"
+        )
+        count = rewrite_file(target, self.variants)
+        self.assertEqual(count, 1)
+        data = target.read_bytes()
+        self.assertEqual(data.count(b"\r\n"), 3)
+        self.assertNotIn(b"\r\r", data)
+        self.assertIn(b'"$USER_HOME$/Projects/WebstormProjects/alpha"', data)
 
     def test_file_with_no_matches_is_untouched(self):
         target = self.tmp / "other.xml"
