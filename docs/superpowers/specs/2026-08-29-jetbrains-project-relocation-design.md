@@ -13,38 +13,37 @@ projects, `~/Projects`, while keeping them grouped by IDE rather than flattened 
 So `~/WebstormProjects` becomes `~/Projects/WebstormProjects`, `~/IdeaProjects` becomes
 `~/Projects/IdeaProjects`, and so on.
 
-Moving the folders is the easy half. The hard half is that each IDE stores absolute paths to
-every project it knows about, so after a move the Recent Projects list points at folders that
-no longer exist. `idea-migrate` performs the move and repairs those references, with a backup
-and a working undo.
+Moving the folder is the easy half. The hard half is that each IDE stores absolute paths to
+every project it knows about, so after a move the Recent Projects list points at folders that no
+longer exist. `idea-migrate` performs the move and repairs those references, with a backup and a
+working undo.
 
 ## 2. Goals
 
-- Relocate selected per-IDE project roots into a destination directory, preserving the
-  per-IDE grouping.
+- Move one directory to a new location, specified by the user.
 - Update every JetBrains IDE's stored references so Recent Projects, trusted paths, and
   per-project window state all resolve correctly after the move.
+- Make path entry painless, with terminal-style tab completion.
 - Make the whole operation reversible, with backups the tool never deletes.
-- Be reusable: the tool discovers what is installed rather than hardcoding this one migration.
 
 ## 3. Non-goals
 
-- Flattening projects into a single directory. The user explicitly wants IDE grouping.
+- Guessing what should be moved. The user says what moves and where it goes. The tool does not
+  scan for candidates or make recommendations.
+- Flattening projects together. Grouping by IDE is the point.
 - Touching the `* copy` folders that already exist in `~/Projects`. These are the user's own
   manual backups and are left entirely alone for manual cleanup later.
-- Moving projects that already live in the destination, or projects outside any IDE root
-  (for example ones opened from `~/Downloads`).
 - Backing up or repairing IDE caches. Those are keyed by path and rebuild themselves.
 
 ## 4. What the investigation established
 
-These facts were verified on the target machine and drive the design. Anyone implementing
-against this spec should treat them as constraints, not assumptions.
+These facts were verified on the target machine and are constraints on the implementation, not
+assumptions.
 
 **Projects are already portable.** The `.idea` directory inside each project uses the
 `$PROJECT_DIR$` placeholder rather than absolute paths. Moving a project folder does not break
-anything inside it. The one place people do hardcode absolute paths is run configurations, so
-the tool warns about those rather than assuming they are clean.
+anything inside it. The one place people do hardcode absolute paths is run configurations, so the
+tool warns about those rather than assuming they are clean.
 
 **Everything that breaks is IDE-level configuration**, stored as XML under
 `~/Library/Application Support/JetBrains/<Product><Version>/`. On the target machine 15 such
@@ -58,69 +57,69 @@ that names its corresponding file in `workspace/`.
 `$USER_HOME$/IdeaProjects/my-project`, where `$USER_HOME$` stands for the home directory. Both
 the placeholder form and the fully expanded form must be handled.
 
-**IDEs cross-reference each other's roots.** PyCharm's recent list contains two entries under
-`WebstormProjects`; IntelliJ's contains entries under both `WebstormProjects` and `Projects`.
-The rewrite therefore cannot be "each IDE fixes its own root" — it must be a single global map
-of old prefix to new prefix, applied to every product directory.
+**Every IDE must be rewritten, not just the obvious one.** PyCharm's recent list contains two
+entries under `WebstormProjects`; IntelliJ's contains entries under both `WebstormProjects` and
+`Projects`. So moving a single root still requires sweeping all 15 product directories — there
+is no shortcut of "this root belongs to that IDE".
 
-**Two spellings, one directory.** `~/PycharmProjects` and `~/PyCharmProjects` report the same
-inode (10549211). The filesystem is case-insensitive, so these are one physical directory that
-answers to either spelling. Discovery must deduplicate by inode or it will try to move the same
-folder twice.
+**The filesystem is case-insensitive.** `~/PycharmProjects` and `~/PyCharmProjects` report the
+same inode (10549211) — one physical directory answering to either spelling. This has a direct
+consequence for the rewrite, covered in Phase 4.
 
-**Some entries are not project roots.** Recent lists also reference `~/Downloads`, `~/offline`,
-and `~/.claude`. These must be visible but not selected by default.
-
-**Sizes.** The project roots total roughly 11 GB, all on the same APFS volume with ample free
-space. Because source and destination share a volume, each move is an atomic instant rename
-rather than a copy. The IDE configuration directories total 23 GB, but almost all of that is
-plugins; the `options/` and `workspace/` directories that we actually touch total about 36 MB
-across all 15 products, so backing up all of them every run is effectively free.
+**Sizes.** The candidate roots total roughly 11 GB, all on the same APFS volume with ample free
+space. Because source and destination share a volume, the move is an atomic instant rename rather
+than a copy. The IDE configuration directories total 23 GB, but almost all of that is plugins;
+the `options/` and `workspace/` directories we actually touch total about 36 MB across all 15
+products, so backing up all of them on every run is effectively free.
 
 ## 5. Design
 
-Five phases. Each is inspectable, and nothing is written until the user confirms a plan.
+Four phases. One source and one destination per run — to move several roots, run it several
+times. Nothing is written until the user confirms.
 
-### Phase 1 — Discover
+### Phase 1 — Input
 
-Find installed IDEs by scanning `~/Library/Application Support/JetBrains/` for any directory
-containing an `options/` subdirectory. This is deliberately structural rather than a hardcoded
-list of product names, so a newly installed product or version is picked up automatically and
-non-product directories (`Toolbox`, `consentOptions`, `PrivacyPolicy`) are excluded without
-needing to be named.
+The user supplies two paths:
 
-For each product, parse `options/recentProjects.xml` and collect every project path from the
-`<entry key="...">` attributes, expanding `$USER_HOME$` to the real home directory.
+```
+idea-migrate --source ~/WebstormProjects --dest ~/Projects/WebstormProjects
+```
 
-Group those paths by parent directory to derive candidate roots. **The home directory itself is
-never a candidate root.** Some projects sit directly in the home directory — the target machine
-has `~/PyCharmMiscProject` — and grouping by parent would otherwise nominate `~` for relocation,
-which would be catastrophic. Such projects are reported in a separate "not part of any root"
-list and left alone.
+If either flag is omitted, the tool prompts for it interactively **with tab completion, the way
+a shell behaves**. This is the part that has to feel right, so it is specified precisely:
 
-For each candidate, record its
-real path, its inode, its true on-disk spelling (found by listing the parent directory and
-matching case-insensitively, since the filesystem itself will answer to any casing), the number
-of projects it contains, its size, and which IDEs reference it.
+- Completion is driven by the standard library `readline` module, with a custom completer that
+  completes filesystem paths.
+- `~` is expanded before completion and before use.
+- Only directories are offered, since only directories are being moved, and a completed
+  directory gets a trailing `/` appended so the user can keep typing deeper without retyping the
+  separator.
+- Completion must work for a partially typed final component, not only for whole directories —
+  typing `~/Webst` then Tab completes to `~/WebstormProjects/`.
+- Two readline implementations exist and they need different key bindings. GNU readline needs
+  `readline.parse_and_bind("tab: complete")`; the libedit build that ships with some macOS
+  Pythons needs `readline.parse_and_bind("bind ^I rl_complete")`. Detect which is present by
+  checking whether `"libedit"` appears in `readline.__doc__` and bind accordingly. The target
+  machine has GNU readline, but the tool must not break on a Python that has libedit.
+- If `readline` cannot be imported at all, fall back to plain `input()` without completion rather
+  than failing.
 
-Deduplicate candidates by `(device, inode)`.
+Validation, all of which abort the run with a clear message:
 
-### Phase 2 — Select
+- The source exists and is a directory.
+- The source is not the home directory itself.
+- The destination does not already exist.
+- The destination's parent exists and is writable.
+- The destination is not inside the source. Without this check,
+  `--source ~/Projects --dest ~/Projects/sub` would attempt to move a directory into itself.
+- The source is not already inside the destination — that migration has already happened.
+- Source and destination are on the same filesystem device, so the move is an atomic rename. If
+  they are not, fall back to copy, verify, then remove.
 
-Present the candidate roots with their project count, size, referencing IDEs, and the proposed
-destination path. The user selects which to migrate.
+Then the tool prints exactly what it will do — the move, the number of configuration files that
+reference the source, and where the backup will go — and asks for confirmation.
 
-Defaults, stated as an explicit rule rather than a judgement call: a candidate is pre-selected
-when it is a direct child of the home directory *and* its name ends with `Projects`,
-case-insensitively. That matches `IdeaProjects`, `PycharmProjects`, `WebstormProjects`,
-`GolandProjects`, and `DataGripProjects`, and excludes `Downloads`, `offline`, and `.claude`,
-which are still listed so the user can select them deliberately if they want. Anything already
-inside the destination is marked as already done and cannot be selected.
-
-Note that moving a root moves every project inside it, including projects that no IDE currently
-lists in its recent history. This is intended — the root is the unit of migration.
-
-### Phase 3 — Back up
+### Phase 2 — Back up
 
 Before anything is modified, copy `options/` and `workspace/` from *every* product directory
 (not just the ones that will change) into a fresh timestamped directory:
@@ -137,38 +136,46 @@ Before anything is modified, copy `options/` and `workspace/` from *every* produ
 ```
 
 The backup root is a single fixed, visible location so the undo script always has a standard
-place to start from. It is configurable, but defaults to `~/Idea-Migration-Backups`.
+place to start from. It defaults to `~/Idea-Migration-Backups` and is configurable.
 
-**The tool never deletes a backup.** There is no retention policy, no pruning, and no cleanup
-flag. Each run adds a directory; removing them is a manual action by the user.
+**The tool never deletes a backup.** There is no retention policy, no pruning, no cleanup flag.
+Each run adds a directory; removing them is a manual action by the user.
 
 The generated `undo.sh` is a standalone shell script that does not depend on the Python tool
 being functional. By default it resolves its own directory and works from there. It also accepts
 an optional path argument (`./undo.sh /some/other/path`) so it still works if the backup folder
 has been moved or renamed.
 
-### Phase 4 — Move
+Product directories are found by scanning `~/Library/Application Support/JetBrains/` for any
+directory containing an `options/` subdirectory. This is structural rather than a hardcoded list
+of product names, so a newly installed product or version is picked up automatically and
+non-product directories such as `Toolbox`, `consentOptions`, and `PrivacyPolicy` are excluded
+without needing to be named.
 
-Preflight checks, all of which abort the run if they fail:
+### Phase 3 — Move
 
-- No JetBrains process is running. A running IDE holds this configuration in memory and writes
-  it out on exit, which would silently overwrite our repairs.
-- Source and destination are on the same filesystem device, so the move is an atomic rename.
-  If not, fall back to copy-then-verify-then-remove.
-- The destination path does not already exist.
-- The destination's parent directory exists and is writable.
+Preflight: refuse to run if any JetBrains process is alive. A running IDE holds this
+configuration in memory and writes it out on exit, which would silently overwrite our repairs.
 
-Then `os.rename` each selected root.
+Then `os.rename(source, dest)`.
 
-### Phase 5 — Rewrite
+### Phase 4 — Rewrite
 
-For each product directory, scan `options/*.xml` and `workspace/*.xml` for the old path
-prefixes. Each moved root generates several prefix variants to search for: the placeholder form
-(`$USER_HOME$/IdeaProjects`), the expanded form (`/Users/<user>/IdeaProjects`), and `file://`
-URL forms of both.
+For each product directory, scan `options/*.xml` and `workspace/*.xml` for the old path. The
+source generates several prefix variants to search for: the placeholder form
+(`$USER_HOME$/WebstormProjects`), the expanded form (`/Users/<user>/WebstormProjects`), and
+`file://` URL forms of both. Each is replaced with the corresponding form of the destination.
 
 **Matching must be boundary-anchored.** A prefix only matches when followed by `/` or by the
-closing quote of the attribute, so `IdeaProjects` never matches `IdeaProjectsArchive`.
+closing quote of the attribute, so `WebstormProjects` never matches `WebstormProjectsArchive`.
+
+**Matching must be case-insensitive, and replacement must preserve the rest of the path.**
+Because the filesystem is case-insensitive, different IDEs may have recorded the same directory
+under different spellings — the `PycharmProjects` / `PyCharmProjects` case above is exactly this.
+A case-sensitive search for the spelling the user happened to type would silently miss entries
+written with the other spelling, leaving broken references behind with no error. So the prefix is
+matched case-insensitively, and only the matched prefix is replaced; everything after it is left
+byte-for-byte alone.
 
 **Editing is done as text, not by re-serializing XML.** Parsing with an XML library and writing
 the tree back reorders attributes and normalizes whitespace across the entire file, turning a
@@ -177,7 +184,7 @@ about. Instead: perform targeted text replacement on the raw file content, then 
 *result* to confirm it is still well-formed XML, and only write if that check passes. The safety
 gain over a `sed` one-liner is the verification step and the anchored matching, not the parser.
 
-After rewriting, re-scan and report any surviving references to old paths, and separately warn
+After rewriting, re-scan and report any surviving references to the old path, and separately warn
 about any project whose own `.idea` directory contains a hardcoded absolute path — most commonly
 in run configurations.
 
@@ -196,44 +203,40 @@ caches under `~/Library/Caches/JetBrains/` are keyed by path. This is slow but s
 describe it later:
 
 - Tool version, timestamp, and the home directory the run targeted.
-- Every planned move as a source and destination pair, each with the status actually achieved
-  (`moved`, `skipped`, `failed`).
+- The source and destination of the move, and the status actually achieved.
 - Every product configuration directory backed up, with its relative path inside `config/`.
 - Every file modified during the rewrite phase, with a count of replacements made.
 - `undone_at`: null initially, written with a timestamp when the run is rolled back.
 
-That last field matters for the `backups` command described below — a backup that has already
-been rolled back must be visibly marked, rather than offering an undo that would do something
-surprising.
+That last field matters for the `backups` command — a backup that has already been rolled back
+must be visibly marked, rather than offering an undo that would do something surprising.
 
 ## 7. Command-line surface
 
 ```
-idea-migrate plan                 # discover and print the proposed migration; writes nothing
-idea-migrate apply                # interactive selection, then back up, move, rewrite
-idea-migrate backups              # list all backups: when, what moved, size, undone or not
-idea-migrate undo <backup-dir>    # roll back a specific run
+idea-migrate --source PATH --dest PATH   # move and repair; prompts for whichever is missing
+idea-migrate --dry-run --source … --dest …   # print the plan, write nothing
+idea-migrate backups                     # list all backups: when, what moved, size, undone or not
+idea-migrate undo <backup-dir>           # roll back a specific run
 ```
 
-`plan` is the default when no subcommand is given, so an accidental bare invocation cannot
-modify anything. `apply` requires explicit confirmation of the selection before it writes.
+Running with no arguments prompts for both paths with tab completion. `--dry-run` prints the full
+plan including which configuration files would change, and writes nothing.
 
 `backups` reads `manifest.json` from every directory under the backup root, so it stays accurate
-without the tool maintaining state anywhere else. For each backup it shows the timestamp, the
-roots that run moved and where to, the size on disk, whether it has been undone, and the undo
-command for that specific backup.
+without the tool maintaining state anywhere else. For each backup it shows the timestamp, what
+that run moved and where to, the size on disk, whether it has been undone, and the undo command
+for that specific backup.
 
 ## 8. Configuration
 
-A TOML file read with the standard library's `tomllib`, holding the destination root, the backup
-root, product directories to exclude, and any extra path prefixes to rewrite. Every setting has a
-default matching this migration, so the file is optional. This is what makes the tool reusable
-for a future move rather than a one-shot script.
+An optional TOML file read with the standard library's `tomllib`, holding the backup root and any
+product directories to exclude. Every setting has a working default, so the file is not required.
 
 ## 9. Constraints on the implementation
 
 - Python 3.11 or newer (3.14 is installed). Standard library only — no third-party dependencies.
-- `plan` is the default and nothing writes without `apply`.
+- Nothing writes without explicit confirmation, and `--dry-run` never writes.
 - Every phase is a separate, independently testable module.
 - Refuse to run while any JetBrains IDE is alive.
 - Never delete a backup.
@@ -242,13 +245,16 @@ for a future move rather than a one-shot script.
 
 - Unit tests for the rewrite function against fixture XML files copied from the real
   configuration with paths anonymized. These must include the near-miss cases that must *not*
-  match: a longer sibling directory name sharing a prefix, a path appearing inside unrelated
-  attribute text, and both placeholder and expanded forms in the same file.
+  match: a longer sibling directory name sharing a prefix, the path appearing inside unrelated
+  attribute text, both placeholder and expanded forms in the same file, and the same directory
+  recorded under two different capitalizations.
 - A malformed-XML fixture to confirm the post-rewrite well-formedness check actually rejects.
-- Discovery tested against a synthetic home directory built in a temporary folder, including
-  the two-spellings-one-inode case and an unrelated root such as `Downloads`.
-- Move and preflight tested against the same synthetic tree, including the refuse-if-IDE-running
-  and destination-exists paths.
-- A full round trip: apply against the synthetic tree, then undo, then assert the tree is
+- Path validation tested against a synthetic tree: destination inside source, source inside
+  destination, source is home, destination already exists, cross-device.
+- The completer tested directly as a function — given a partial path, it returns the expected
+  directory candidates — so the tests do not need a terminal.
+- Move and preflight tested against the synthetic tree, including the refuse-if-IDE-running and
+  destination-exists paths.
+- A full round trip: run against the synthetic tree, then undo, then assert the tree is
   byte-identical to its starting state.
 - No test touches the real home directory or the real JetBrains configuration.
