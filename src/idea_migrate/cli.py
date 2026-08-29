@@ -92,14 +92,21 @@ def _find_hardcoded_paths(root: Path, home: Path) -> list[str]:
     return sorted(warnings)
 
 
-def _recovery_lines(backup_dir: Path) -> list[str]:
-    """Describe how to recover when a migration failed after the move started."""
-    return [
+def _print_recovery(backup_dir: Path) -> None:
+    """Print how to recover when a migration failed after the move started.
+
+    This is driven by filesystem state (has the directory actually moved),
+    not by the kind of exception that interrupted the run - a Ctrl-C or an
+    unanticipated bug loses the directory just as surely as a MigrateError
+    does, and the user needs the same recovery route either way.
+    """
+    for line in [
         "",
         "The migration failed partway through. A backup was taken before any "
         "change was made, and the directory may already have been moved.",
         f"To restore the previous state, run: {backup_dir / 'undo.sh'}",
-    ]
+    ]:
+        print(line, file=sys.stderr)
 
 
 def run_migration(
@@ -172,9 +179,17 @@ def run_migration(
     except (MigrateError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         if moved and backup_dir is not None:
-            for line in _recovery_lines(backup_dir):
-                print(line, file=sys.stderr)
+            _print_recovery(backup_dir)
         return 1
+    except BaseException:
+        # Ctrl-C, or a bug we did not anticipate. The user still needs to
+        # know a backup exists and how to reverse a move that already
+        # happened, so print the recovery route before letting this
+        # propagate to main() (or, for a bug, all the way out as a
+        # traceback - that is still the right outcome for a bug).
+        if moved and backup_dir is not None:
+            _print_recovery(backup_dir)
+        raise
 
     warnings = _find_hardcoded_paths(spec.dest, spec.home)
     print(

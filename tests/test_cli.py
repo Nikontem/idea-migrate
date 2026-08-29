@@ -160,6 +160,72 @@ class TestRunMigration(MigrationTestCase):
         self.assertEqual(len(backups), 1)
         self.assertIn(str(backups[0]), output)
 
+    def test_keyboard_interrupt_after_the_move_still_reports_the_undo_command(self):
+        args = build_parser().parse_args(
+            ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
+        )
+        stderr = io.StringIO()
+        with (
+            patch(
+                "idea_migrate.cli.rewrite_products",
+                side_effect=KeyboardInterrupt(),
+            ),
+            redirect_stderr(stderr),
+            redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                run_migration(args, self.home, NOW, ps_output=QUIET)
+
+        # The recovery message must be driven by whether the move actually
+        # happened, not by the exception's type - Ctrl-C is neither a
+        # MigrateError nor an OSError.
+        self.assertFalse(self.source.exists())
+        self.assertTrue(self.dest.is_dir())
+        output = stderr.getvalue()
+        self.assertIn("undo.sh", output)
+        backups = list((self.home / "Idea-Migration-Backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertIn(str(backups[0]), output)
+
+    def test_unanticipated_exception_after_the_move_still_reports_the_undo_command(self):
+        args = build_parser().parse_args(
+            ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
+        )
+        stderr = io.StringIO()
+        with (
+            patch(
+                "idea_migrate.cli.rewrite_products",
+                side_effect=RuntimeError("unexpected bug"),
+            ),
+            redirect_stderr(stderr),
+            redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(RuntimeError):
+                run_migration(args, self.home, NOW, ps_output=QUIET)
+
+        self.assertFalse(self.source.exists())
+        self.assertTrue(self.dest.is_dir())
+        output = stderr.getvalue()
+        self.assertIn("undo.sh", output)
+        backups = list((self.home / "Idea-Migration-Backups").iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertIn(str(backups[0]), output)
+
+
+class TestPromptForPathNonInteractive(unittest.TestCase):
+    def test_no_stdin_raises_a_clean_message_instead_of_a_traceback(self):
+        stderr = io.StringIO()
+        with (
+            patch("builtins.input", side_effect=EOFError()),
+            redirect_stderr(stderr),
+            redirect_stdout(io.StringIO()),
+        ):
+            code = main(["--dest", "/tmp/somewhere", "--yes"])
+        self.assertEqual(code, 1)
+        output = stderr.getvalue()
+        self.assertIn("--source", output)
+        self.assertNotIn("Traceback", output)
+
 
 class TestMainErrorHandling(unittest.TestCase):
     def test_invalid_path_prints_one_line_and_returns_one(self):

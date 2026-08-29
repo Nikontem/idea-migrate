@@ -16,6 +16,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from .errors import MigrateError
+
 try:  # pragma: no cover - exercised by whichever branch the platform provides
     import readline
 except ImportError:  # pragma: no cover
@@ -99,7 +101,13 @@ def prompt_for_path(prompt: str) -> Path:
     """Ask the user for a path, with tab completion when it is available."""
     enable_path_completion()
     while True:
-        raw = input(prompt).strip()
+        try:
+            raw = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt) as exc:
+            raise MigrateError(
+                "No input available - pass --source and --dest explicitly "
+                "when running non-interactively."
+            ) from exc
         if raw:
             return Path(os.path.expanduser(raw)).absolute()
         print("Please enter a path.")
