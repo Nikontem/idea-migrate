@@ -13,6 +13,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from .backup import BACKED_UP_SUBDIRS
 from .errors import UndoError
 from .manifest import MANIFEST_NAME, mark_undone, read_manifest
 from .mover import assert_no_ide_running
@@ -61,7 +62,7 @@ def undo_backup(
         for product_backup in sorted(config_root.iterdir()):
             if not product_backup.is_dir():
                 continue
-            for subdir in ("options", "workspace"):
+            for subdir in BACKED_UP_SUBDIRS:
                 saved = product_backup / subdir
                 if not saved.is_dir():
                     continue

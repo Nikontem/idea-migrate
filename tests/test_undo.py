@@ -92,6 +92,35 @@ class TestUndoBackup(UndoTestCase):
         self.assertTrue(self.backup_dir.is_dir())
         self.assertTrue((self.backup_dir / "manifest.json").is_file())
 
+    def test_a_file_created_after_the_migration_survives_the_undo(self):
+        """Restoring settings is a merge, not a wholesale replacement.
+
+        This is a deliberate design decision, so it is pinned here. Between
+        the migration and the undo an IDE may write settings files that did
+        not exist when the backup was taken - a new plugin's options, say.
+        Undo overwrites the files it captured and leaves everything else
+        alone. Replacing the settings directory outright instead would make
+        an undo silently destroy unrelated work the user never asked to roll
+        back.
+        """
+        created_later = self.product / "options" / "brand-new-plugin.xml"
+        created_later.write_text("CREATED AFTER THE MIGRATION", encoding="utf-8")
+
+        undo_backup(self.backup_dir, self.jetbrains, NOW, ps_output=QUIET)
+
+        self.assertTrue(created_later.is_file())
+        self.assertEqual(
+            created_later.read_text(encoding="utf-8"),
+            "CREATED AFTER THE MIGRATION",
+        )
+        # And the file that was backed up is still rolled back.
+        self.assertEqual(
+            (self.product / "options" / "recentProjects.xml").read_text(
+                encoding="utf-8"
+            ),
+            "BEFORE",
+        )
+
     def test_declines_the_move_but_still_restores_settings_when_source_exists(self):
         self.source.mkdir(parents=True)
         (self.source / "already-here.txt").write_text(

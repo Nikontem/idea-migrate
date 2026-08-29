@@ -14,6 +14,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+from .backup import UNDO_SCRIPT_NAME
+
 
 def format_plan(
     source: Path,
@@ -53,8 +55,19 @@ def format_result(
         "",
         f"  Moved:   {source}",
         f"      ->   {dest}",
-        f"  Repaired {total} path references in {len(rewritten)} files.",
     ]
+
+    if rewritten:
+        lines.append(
+            f"  Repaired {total} path references in {len(rewritten)} files."
+        )
+    else:
+        # "Repaired 0 references in 0 files" reads like a failure. Say which
+        # of the two it was: the search ran and found nothing to change.
+        lines.append(
+            "  No path references needed repairing: no configuration file "
+            "mentioned the old location."
+        )
 
     if remaining:
         lines.append(
@@ -78,7 +91,7 @@ def format_result(
             "This backup is never deleted automatically. To reverse this "
             "migration, run either of these:",
             f"  idea-migrate undo {backup_dir}",
-            f"  {backup_dir / 'undo.sh'}",
+            f"  {backup_dir / UNDO_SCRIPT_NAME}",
         ]
     )
     return "\n".join(lines) + "\n"

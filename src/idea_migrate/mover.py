@@ -81,7 +81,15 @@ def _describe_copy_failure(exc: OSError, limit: int = 3) -> str:
 
 
 def move_directory(spec: MoveSpec) -> None:
-    """Move the source directory to the destination."""
+    """Move the source directory to the destination.
+
+    On a cross-device move the copy is verified by comparing the two trees
+    entry by entry on path, kind (file, directory or symbolic link) and size -
+    not by hashing contents, which on a multi-gigabyte tree would cost more
+    than the copy itself. That catches a truncated or missing file, which is
+    what an interrupted or out-of-space copy produces; it would not catch
+    silent corruption that preserved every file's length.
+    """
     if spec.same_device:
         os.rename(spec.source, spec.dest)
         return

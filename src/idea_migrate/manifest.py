@@ -14,7 +14,6 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
 MANIFEST_NAME = "manifest.json"
-MANIFEST_VERSION = 1
 
 
 @dataclass(frozen=True)

@@ -24,13 +24,14 @@ except ImportError:  # pragma: no cover
     readline = None  # type: ignore[assignment]
 
 
-def path_candidates(text: str, only_dirs: bool = True) -> list[str]:
-    """Return the completions for a partially typed path.
+def path_candidates(text: str) -> list[str]:
+    """Return the directory completions for a partially typed path.
 
-    The returned strings keep whatever directory prefix the user typed, so "~/"
-    stays "~/" rather than expanding to an absolute path on screen. Directories
-    come back with a trailing separator so typing can continue straight into the
-    next component.
+    Only directories are offered, because every prompt that uses this asks for
+    one. The returned strings keep whatever directory prefix the user typed,
+    so "~/" stays "~/" rather than expanding to an absolute path on screen,
+    and each comes back with a trailing separator so typing can continue
+    straight into the next component.
     """
     typed_dir, partial = os.path.split(text)
     search_dir = Path(os.path.expanduser(typed_dir or "."))
@@ -51,18 +52,16 @@ def path_candidates(text: str, only_dirs: bool = True) -> list[str]:
     for entry in entries:
         if not entry.name.lower().startswith(lowered):
             continue
-        is_dir = entry.is_dir()
-        if only_dirs and not is_dir:
+        if not entry.is_dir():
             continue
-        candidates.append(f"{prefix}{entry.name}{'/' if is_dir else ''}")
+        candidates.append(f"{prefix}{entry.name}/")
     return candidates
 
 
 class PathCompleter:
     """A readline completer over filesystem paths."""
 
-    def __init__(self, only_dirs: bool = True) -> None:
-        self.only_dirs = only_dirs
+    def __init__(self) -> None:
         self._cache_text: str | None = None
         self._cache: list[str] = []
 
@@ -70,13 +69,13 @@ class PathCompleter:
         """Return the ``state``-th completion for ``text``, or None when exhausted."""
         if state == 0 or text != self._cache_text:
             self._cache_text = text
-            self._cache = path_candidates(text, only_dirs=self.only_dirs)
+            self._cache = path_candidates(text)
         if state < len(self._cache):
             return self._cache[state]
         return None
 
 
-def enable_path_completion(only_dirs: bool = True) -> bool:
+def enable_path_completion() -> bool:
     """Install the path completer on readline.
 
     Returns False when readline is unavailable, so the caller can fall back to a
@@ -85,7 +84,7 @@ def enable_path_completion(only_dirs: bool = True) -> bool:
     if readline is None:
         return False
 
-    readline.set_completer(PathCompleter(only_dirs=only_dirs).complete)
+    readline.set_completer(PathCompleter().complete)
     # Without this, "/" and "~" are treated as word boundaries and the completer
     # receives only the trailing fragment.
     readline.set_completer_delims(" \t\n")
@@ -103,7 +102,14 @@ def prompt_for_path(prompt: str) -> Path:
     while True:
         try:
             raw = input(prompt).strip()
-        except (EOFError, KeyboardInterrupt) as exc:
+        except EOFError as exc:
+            # End of input means there is no one there to answer: the tool is
+            # being run non-interactively without the paths it needs. Ctrl-C
+            # is deliberately not caught here. It is a person cancelling on
+            # purpose, and it belongs to main(), which prints a plain
+            # "Cancelled." and exits 130. Turning it into this message would
+            # report a deliberate cancel as a non-interactive failure and
+            # advise a fix for a problem the user does not have.
             raise MigrateError(
                 "No input available - pass --source and --dest explicitly "
                 "when running non-interactively."

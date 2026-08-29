@@ -57,6 +57,17 @@ class TestFormatResult(unittest.TestCase):
         self.assertIn("5", text)
         self.assertIn("2 files", text)
 
+    def test_nothing_to_repair_says_so_in_words(self):
+        """Zero must be explained, not just printed.
+
+        "Repaired 0 path references in 0 files" reads like something went
+        wrong. The report has to say which it was: the search ran and there
+        was nothing in any configuration file to change.
+        """
+        text = format_result(SOURCE, DEST, {}, 0, [], BACKUP)
+        self.assertIn("No path references needed repairing", text)
+        self.assertNotIn("Repaired 0 path references", text)
+
     def test_surviving_references_are_flagged(self):
         text = format_result(SOURCE, DEST, {"/a.xml": 3}, 4, [], BACKUP)
         self.assertIn("4", text)

@@ -21,7 +21,12 @@ from datetime import datetime
 from pathlib import Path
 
 from . import __version__
-from .backup import back_up_products, new_backup_dir, write_undo_script
+from .backup import (
+    UNDO_SCRIPT_NAME,
+    back_up_products,
+    new_backup_dir,
+    write_undo_script,
+)
 from .completion import prompt_for_path
 from .config import load_config
 from .errors import MigrateError
@@ -122,7 +127,7 @@ def _print_recovery(backup_dir: Path) -> None:
         "change was made, and the directory may already have been moved.",
         "To restore the previous state, run either of these:",
         f"  idea-migrate undo {backup_dir}",
-        f"  {backup_dir / 'undo.sh'}",
+        f"  {backup_dir / UNDO_SCRIPT_NAME}",
     ]:
         print(line, file=sys.stderr)
 

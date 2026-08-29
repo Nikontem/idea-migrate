@@ -155,11 +155,21 @@ class TestRoundTrip(unittest.TestCase):
         self.assertIn("$USER_HOME$/WebstormProjectsArchive/beta", text)
         self.assertIn("$USER_HOME$/Downloads/gamma", text)
 
+        # The owner-only file must still be owner-only *now*, after the
+        # rewrite and before the undo. Checking only the final state would
+        # pass even if the migration had widened the permissions and the undo
+        # happened to narrow them again - and a user who never undoes would
+        # be left with settings readable by everyone.
+        restricted = self.jetbrains / "PyCharm2025.3" / "options" / "recentProjects.xml"
+        self.assertEqual(stat.S_IMODE(restricted.lstat().st_mode), 0o600)
+
         backups = sorted(self.backup_root.iterdir())
         self.assertEqual(len(backups), 1)
 
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             undo_backup(backups[0], self.jetbrains, LATER, ps_output=QUIET)
+
+        self.assertEqual(stat.S_IMODE(restricted.lstat().st_mode), 0o600)
 
         after = snapshot(self.home, self.backup_root)
         self.assertEqual(before, after)

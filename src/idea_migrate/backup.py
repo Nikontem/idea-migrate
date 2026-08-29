@@ -150,7 +150,14 @@ def back_up_products(
             for subdir in BACKED_UP_SUBDIRS:
                 origin = product / subdir
                 if origin.is_dir():
-                    shutil.copytree(origin, config_root / product.name / subdir)
+                    # symlinks=True, as in mover.py and undo.py: a link is
+                    # copied as a link, so a restore puts back what was there
+                    # rather than a copy of whatever it pointed at.
+                    shutil.copytree(
+                        origin,
+                        config_root / product.name / subdir,
+                        symlinks=True,
+                    )
             names.append(product.name)
     except OSError as exc:
         raise BackupError(f"Could not create the backup: {exc}") from exc
