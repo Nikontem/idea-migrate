@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "idea-migrate"
+version = "0.1.0"
+description = "Move JetBrains project directories and repair the IDEs' stored path references."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+idea-migrate = "idea_migrate.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
