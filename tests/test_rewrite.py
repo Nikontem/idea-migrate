@@ -90,6 +90,21 @@ class TestRewriteText(unittest.TestCase):
         self.assertEqual(result, text)
         self.assertEqual(count, 0)
 
+    def test_matches_bare_path_in_a_text_node_before_a_newline(self):
+        text = "<a>$USER_HOME$/WebstormProjects\n</a>"
+        result, count = rewrite_text(text, self.variants)
+        self.assertEqual(result, "<a>$USER_HOME$/Projects/WebstormProjects\n</a>")
+        self.assertEqual(count, 1)
+
+    def test_destination_nested_under_source_is_rewritten_only_once(self):
+        source = HOME / "Projects"
+        nested = source / "Sub"
+        variants = prefix_variants(source, nested, HOME)
+        text = '<a k="file:///Users/tester/Projects/x" />'
+        result, count = rewrite_text(text, variants)
+        self.assertEqual(result, '<a k="file:///Users/tester/Projects/Sub/x" />')
+        self.assertEqual(count, 1)
+
     def test_replacement_is_literal_not_a_backreference(self):
         odd_new = Path("/Users/tester/a\\1b")
         variants = prefix_variants(OLD, odd_new, HOME)

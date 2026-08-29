@@ -3,8 +3,13 @@
 This is the highest-risk part of the tool, so three rules govern it.
 
 Boundary anchoring: a prefix matches only when the next character ends the path
-component - a separator, a quote, an angle bracket, or end of string. Without
-this, moving "WebstormProjects" would also corrupt "WebstormProjectsArchive".
+component - a separator, a quote, an angle bracket, whitespace, or end of
+string. Without this, moving "WebstormProjects" would also corrupt
+"WebstormProjectsArchive".
+
+One pass: every prefix goes into a single alternation rather than a substitution
+each, so no byte can be rewritten twice by a later variant matching an earlier
+variant's output.
 
 Case-insensitive matching: the filesystem is case-insensitive, so different IDEs
 may have recorded one directory under different spellings. A case-sensitive
@@ -31,7 +36,10 @@ from .errors import XmlIntegrityError
 USER_HOME_MACRO = "$USER_HOME$"
 
 # The prefix must be followed by something that ends the path component.
-_BOUNDARY = r"""(?=[/"'<]|$)"""
+# Whitespace counts: a bare path written as element text rather than as an
+# attribute value is followed by a newline, and leaving it out meant such a
+# reference was silently skipped while the tool still reported success.
+_BOUNDARY = r"""(?=[/"'<\s]|$)"""
 
 
 def _macro_form(path: Path, home: Path) -> str | None:
@@ -65,15 +73,29 @@ def prefix_variants(old: Path, new: Path, home: Path) -> list[tuple[str, str]]:
 def rewrite_text(
     text: str, variants: Sequence[tuple[str, str]]
 ) -> tuple[str, int]:
-    """Replace every anchored occurrence of each old prefix. Returns text and count."""
-    total = 0
-    for old, new in variants:
-        pattern = re.compile(re.escape(old) + _BOUNDARY, re.IGNORECASE)
-        # A lambda keeps the replacement literal - a backslash or \g in a path
-        # would otherwise be read as a backreference.
-        text, count = pattern.subn(lambda _match, value=new: value, text)
-        total += count
-    return text, total
+    """Replace every anchored occurrence of each old prefix, in one pass.
+
+    One alternation over all the prefixes is used rather than one substitution
+    per prefix, so text that has already been rewritten can never be matched
+    again by a later variant. Substituting variant by variant meant a
+    destination nested under the source had its new tail appended twice. The
+    longest prefixes are tried first, so where two overlap the most specific one
+    wins. Returns the new text and the number of replacements made.
+    """
+    ordered = sorted(variants, key=lambda pair: len(pair[0]), reverse=True)
+    if not ordered:
+        return text, 0
+
+    # Matching is case-insensitive, so the matched text is looked up by its
+    # lowercase form to find the replacement that belongs to it.
+    lookup = {old.lower(): new for old, new in ordered}
+    pattern = re.compile(
+        "(?:" + "|".join(re.escape(old) for old, _ in ordered) + ")" + _BOUNDARY,
+        re.IGNORECASE,
+    )
+    # A lambda keeps the replacement literal - a backslash or \g in a path
+    # would otherwise be read as a backreference.
+    return pattern.subn(lambda match: lookup[match.group(0).lower()], text)
 
 
 def config_files(product_dir: Path) -> list[Path]:
