@@ -14,6 +14,8 @@ class TestDefaultConfig(unittest.TestCase):
             cfg.jetbrains_root,
             home / "Library" / "Application Support" / "JetBrains",
         )
+        self.assertEqual(cfg.claude_root, home / ".claude")
+        self.assertEqual(cfg.claude_registry, home / ".claude.json")
         self.assertEqual(cfg.exclude_products, ())
 
     def test_config_is_frozen(self):
@@ -50,6 +52,48 @@ class TestLoadConfig(unittest.TestCase):
                 cfg.jetbrains_root,
                 home / "Library" / "Application Support" / "JetBrains",
             )
+            self.assertEqual(cfg.claude_root, home / ".claude")
+            self.assertEqual(cfg.claude_registry, home / ".claude.json")
+
+    def test_claude_root_can_be_overridden(self):
+        home = Path("/fake/home")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file = Path(tmp) / "config.toml"
+            cfg_file.write_text(
+                'claude_root = "/custom/claude"\n', encoding="utf-8"
+            )
+            cfg = load_config(cfg_file, home)
+            self.assertEqual(cfg.claude_root, Path("/custom/claude"))
+
+    def test_tilde_in_claude_root_is_expanded(self):
+        home = Path("/fake/home")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file = Path(tmp) / "config.toml"
+            cfg_file.write_text('claude_root = "~/.claude-alt"\n', encoding="utf-8")
+            cfg = load_config(cfg_file, home)
+            self.assertEqual(cfg.claude_root, Path.home() / ".claude-alt")
+
+    def test_claude_registry_can_be_overridden(self):
+        home = Path("/fake/home")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file = Path(tmp) / "config.toml"
+            cfg_file.write_text(
+                'claude_registry = "/custom/claude.json"\n', encoding="utf-8"
+            )
+            cfg = load_config(cfg_file, home)
+            self.assertEqual(cfg.claude_registry, Path("/custom/claude.json"))
+            # The registry file and the data directory are set independently.
+            self.assertEqual(cfg.claude_root, home / ".claude")
+
+    def test_tilde_in_claude_registry_is_expanded(self):
+        home = Path("/fake/home")
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_file = Path(tmp) / "config.toml"
+            cfg_file.write_text(
+                'claude_registry = "~/.claude-alt.json"\n', encoding="utf-8"
+            )
+            cfg = load_config(cfg_file, home)
+            self.assertEqual(cfg.claude_registry, Path.home() / ".claude-alt.json")
 
     def test_tilde_in_config_is_expanded(self):
         home = Path("/fake/home")

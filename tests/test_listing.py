@@ -73,6 +73,102 @@ class TestFindBackups(unittest.TestCase):
             )
 
 
+def make_batch_backup(root: Path, stamp: str) -> Path:
+    """A backup whose manifest records three moves made in one batch run."""
+    backup_dir = root / stamp
+    (backup_dir / "config").mkdir(parents=True)
+    (backup_dir / "config" / "x.xml").write_text("<a/>", encoding="utf-8")
+    moves = [
+        {
+            "source": "/Users/tester/Alpha",
+            "dest": "/Users/tester/Projects/Alpha",
+            "status": "moved",
+            "rewritten_files": {"/x/Alpha.xml": 1},
+            "claude_renames": [],
+            "claude_rewritten_files": {},
+            "registry_renames": [],
+        },
+        {
+            "source": "/Users/tester/Beta",
+            "dest": "/Users/tester/Projects/Beta",
+            "status": "moved",
+            "rewritten_files": {"/x/Beta.xml": 1},
+            "claude_renames": [],
+            "claude_rewritten_files": {},
+            "registry_renames": [],
+        },
+        {
+            "source": "/Users/tester/Gamma",
+            "dest": "/Users/tester/Projects/Gamma",
+            "status": "moved",
+            "rewritten_files": {"/x/Gamma.xml": 1},
+            "claude_renames": [],
+            "claude_rewritten_files": {},
+            "registry_renames": [],
+        },
+    ]
+    write_manifest(
+        backup_dir,
+        Manifest(
+            version=1,
+            tool_version="0.1.0",
+            created_at=stamp,
+            home="/Users/tester",
+            jetbrains_root="/Users/tester/Library/Application Support/JetBrains",
+            source="/Users/tester/Alpha",
+            dest="/Users/tester/Projects/Alpha",
+            move_status="moved",
+            backed_up_products=["IntelliJIdea2026.2"],
+            rewritten_files={"/x/Alpha.xml": 1, "/x/Beta.xml": 1, "/x/Gamma.xml": 1},
+            undone_at=None,
+            moves=moves,
+        ),
+    )
+    return backup_dir
+
+
+class TestFormatBackupsWithABatch(unittest.TestCase):
+    def test_lists_every_move_in_order_as_moved_arrow_pairs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_batch_backup(root, "2026-08-29_100000")
+            text = format_backups(find_backups(root), root)
+            alpha = text.index("/Users/tester/Alpha")
+            alpha_arrow = text.index("/Users/tester/Projects/Alpha")
+            beta = text.index("/Users/tester/Beta")
+            beta_arrow = text.index("/Users/tester/Projects/Beta")
+            gamma = text.index("/Users/tester/Gamma")
+            gamma_arrow = text.index("/Users/tester/Projects/Gamma")
+            self.assertTrue(alpha < alpha_arrow < beta < beta_arrow < gamma < gamma_arrow)
+            self.assertEqual(text.count("moved:"), 3)
+            self.assertEqual(text.count("->"), 3)
+
+    def test_still_shows_files_repaired_and_undo_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            backup_dir = make_batch_backup(root, "2026-08-29_100000")
+            text = format_backups(find_backups(root), root)
+            self.assertIn("files repaired: 3 across 1 products", text)
+            self.assertIn(f"idea-migrate undo {backup_dir}", text)
+            self.assertIn(str(backup_dir / "undo.sh"), text)
+
+    def test_a_manifest_without_moves_is_listed_as_before(self):
+        """A pre-batch manifest still yields exactly one moved/-> pair.
+
+        move_records() falls back to the top-level source/dest for such a
+        manifest, so the listing must show only that one pair - not zero, and
+        not the batch layout leaking in from elsewhere.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            make_backup(root, "2026-08-29_100000")
+            text = format_backups(find_backups(root), root)
+            self.assertEqual(text.count("moved:"), 1)
+            self.assertEqual(text.count("->"), 1)
+            self.assertIn("/Users/tester/WebstormProjects", text)
+            self.assertIn("/Users/tester/Projects/WebstormProjects", text)
+
+
 class TestFormatBackups(unittest.TestCase):
     def test_empty_listing_mentions_the_root(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -21,6 +21,11 @@ from .errors import BackupError
 
 UNDO_SCRIPT_NAME = "undo.sh"
 BACKED_UP_SUBDIRS = ("options", "workspace")
+# The saved copy of Claude Code's per-project registry, at the top of the backup
+# directory rather than under claude/. That directory mirrors the layout below
+# claude_root, and the registry file sits beside claude_root rather than inside
+# it, so it has nowhere to go in that tree without inventing a place for it.
+REGISTRY_BACKUP_NAME = "claude-registry.json"
 
 UNDO_SCRIPT = r"""#!/usr/bin/env bash
 # Roll back one idea-migrate run.
@@ -43,8 +48,6 @@ read_field() {
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get(sys.argv[2]) or "")' "$MANIFEST" "$1"
 }
 
-SOURCE="$(read_field source)"
-DEST="$(read_field dest)"
 UNDONE_AT="$(read_field undone_at)"
 HOME_DIR="$(read_field home)"
 
@@ -102,19 +105,104 @@ if [ -n "$RUNNING_IDES" ]; then
   exit 1
 fi
 
+# How many Claude Code project entries this run renamed. Read as a count
+# rather than as the list itself, so an old manifest with no such key reports
+# "0" and the summary simply omits the line.
+CLAUDE_ENTRIES="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("claude_renames") or []))' "$MANIFEST")"
+
+# The Claude Code registry file this run rewrote, and how many of its keys were
+# renamed. The path is what decides whether the line is printed at all: a
+# manifest written before this feature has no such key, read_field gives an
+# empty string, and the summary says nothing about a registry.
+CLAUDE_REGISTRY="$(read_field claude_registry)"
+CLAUDE_REGISTRY_KEYS="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("claude_registry_renames") or []))' "$MANIFEST")"
+
+# How many IDE module caches this run renamed. Counted the same way and for the
+# same reason as the Claude Code entries: an old manifest has no such key,
+# reports "0", and the summary omits the line.
+CACHE_DIRS="$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1])).get("cache_renames") or []))' "$MANIFEST")"
+
 echo "Rolling back:"
-echo "  move   $DEST -> $SOURCE"
+# One line per directory this run moved, in the order they are about to be
+# reversed - which is the reverse of the order they were moved in. A run that
+# moved a single directory has no "moves" list in older manifests, and none is
+# needed: the top-level source and dest describe that one move.
+python3 - "$MANIFEST" <<'PY'
+import json, sys
+
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+
+moves = data.get("moves") or [
+    {"source": data.get("source"), "dest": data.get("dest")}
+]
+for record in reversed(moves):
+    print("  move   " + str(record.get("dest")) + " -> " + str(record.get("source")))
+PY
 echo "  config restored from $BACKUP_DIR/config"
+if [ "$CLAUDE_ENTRIES" != "0" ]; then
+  echo "  claude $CLAUDE_ENTRIES project entries renamed back"
+fi
+if [ -n "$CLAUDE_REGISTRY" ]; then
+  echo "  claude project registry restored ($CLAUDE_REGISTRY_KEYS keys)"
+fi
+if [ "$CACHE_DIRS" != "0" ]; then
+  echo "  caches $CACHE_DIRS IDE module caches renamed back"
+fi
 echo
 
-if [ -d "$DEST" ] && [ ! -e "$SOURCE" ]; then
-  mv "$DEST" "$SOURCE"
-  echo "Moved $DEST back to $SOURCE"
-elif [ -e "$SOURCE" ]; then
-  echo "Source $SOURCE already exists; leaving the directory alone."
-else
-  echo "Destination $DEST not found; leaving the directory alone."
-fi
+# Every directory this run moved, put back in the reverse of the order it was
+# moved in. Reverse order matters when one move's destination sat inside
+# another move's source: undoing the outer move first would carry the inner
+# directory along with it, and the inner reversal would then find nothing where
+# it expected something.
+#
+# What is on disk decides what happens to each record; the recorded status only
+# chooses the wording. A run stopped with Ctrl-C can leave a record saying
+# "pending" for a directory that did move, so believing the status over the
+# filesystem would skip a move that still needs reversing.
+#
+# This is python3 rather than `mv` because the source's parent may have to be
+# recreated first, and because the fallback for a manifest with no "moves" key
+# has to be read from JSON anyway.
+python3 - "$MANIFEST" <<'PY'
+import json, os, shutil, sys
+
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+
+moves = data.get("moves") or [
+    {
+        "source": data.get("source"),
+        "dest": data.get("dest"),
+        "status": data.get("move_status"),
+    }
+]
+
+for record in reversed(moves):
+    source = str(record.get("source") or "")
+    dest = str(record.get("dest") or "")
+    status = record.get("status") or "pending"
+    if os.path.isdir(dest) and not os.path.exists(source):
+        parent = os.path.dirname(source)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        shutil.move(dest, source)
+        print("Moved " + dest + " back to " + source)
+    elif (
+        status == "pending"
+        and os.path.exists(source)
+        and not os.path.exists(dest)
+    ):
+        print(
+            "Move " + source + " -> " + dest
+            + " was never started; nothing to reverse."
+        )
+    elif os.path.exists(source):
+        print("Source " + source + " already exists; leaving the directory alone.")
+    else:
+        print("Destination " + dest + " not found; leaving the directory alone.")
+PY
 
 if [ -d "$BACKUP_DIR/config" ]; then
   for product_dir in "$BACKUP_DIR"/config/*/; do
@@ -129,6 +217,159 @@ if [ -d "$BACKUP_DIR/config" ]; then
     echo "Restored settings for $product"
   done
 fi
+
+# Claude Code's per-project data, reversed the same way the Python undo does
+# it: rename each entry directory back, then merge the saved copies of the
+# files that were rewritten over what is there now. A manifest written before
+# this feature has neither key and this block does nothing at all.
+#
+# The renames are walked in reverse so the reversal mirrors the order the
+# migration applied them. Each one is checked rather than forced: a destination
+# that is no longer a directory, or an old name that something has since taken,
+# means the situation is not the one this backup describes, and guessing would
+# risk clobbering whatever is there.
+python3 - "$MANIFEST" "$BACKUP_DIR" <<'PY'
+import json, os, shutil, sys
+
+manifest_path, backup_dir = sys.argv[1], sys.argv[2]
+with open(manifest_path) as handle:
+    data = json.load(handle)
+
+claude_root = data.get("claude_root") or os.path.join(data.get("home") or "", ".claude")
+
+for old, new in reversed(data.get("claude_renames") or []):
+    if os.path.isdir(new) and not os.path.exists(old):
+        os.rename(new, old)
+        print("Renamed Claude Code entry " + new + " back to " + old)
+    elif os.path.exists(old):
+        print("Claude Code entry " + old + " already exists; left it alone.")
+    else:
+        print("Claude Code entry " + new + " not found; left it alone.")
+
+saved = os.path.join(backup_dir, "claude")
+if os.path.isdir(saved):
+    shutil.copytree(saved, claude_root, dirs_exist_ok=True)
+    print("Restored Claude Code files from " + saved)
+
+# The per-project registry is put back whole rather than merged, because it was
+# rewritten whole. copy2 carries the saved permission bits across with the
+# bytes, so a restore cannot widen who can read it. A run that renamed no
+# registry keys recorded no path and saved no copy, and this does nothing.
+registry = data.get("claude_registry")
+saved_registry = os.path.join(backup_dir, "claude-registry.json")
+if registry and os.path.isfile(saved_registry):
+    shutil.copy2(saved_registry, registry)
+    print("Restored Claude Code project registry " + registry)
+PY
+
+# The IDE's stored module definitions, reversed the same way the Python undo
+# does it: rename each cache directory back to the name the source path hashes
+# to, then rewrite the one absolute path recorded inside it the other way.
+#
+# The prefix matching is reimplemented here rather than imported, because this
+# script has to work when the tool itself is what broke. It has to agree with
+# the tool exactly, so the boundary set is the same one rewrite.py uses: a
+# prefix matches only when the next character ends the path component, and
+# space and ">" are deliberately not in that set because both are legal in a
+# macOS directory name.
+python3 - "$MANIFEST" <<'PY'
+import json, os, re, sys
+
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+
+home = data.get("home") or ""
+BOUNDARY = "(?=[/\"'<\r\n\t]|$)"
+
+
+# Every spelling of the old prefix, paired with the new one.
+def variants(old, new):
+    pairs = [(old, new)]
+    if home and old.startswith(home + "/"):
+        macro_new = (
+            "$USER_HOME$" + new[len(home):] if new.startswith(home + "/") else new
+        )
+        pairs.append(("$USER_HOME$" + old[len(home):], macro_new))
+    for before, after in list(pairs):
+        pairs.append(("file://" + before, "file://" + after))
+    return pairs
+
+
+# Replace every old prefix with its new one, in a single pass: one alternation,
+# longest first, so no byte written by one variant can be matched again by
+# another. Matching is case-insensitive because macOS is, and only the matched
+# prefix is replaced - every byte after it is kept exactly as found.
+def rewrite(text, pairs):
+    mapping = {before.lower(): after for before, after in pairs}
+    ordered = sorted(pairs, key=lambda pair: -len(pair[0]))
+    pattern = re.compile(
+        "(?:" + "|".join(re.escape(before) for before, _ in ordered) + ")" + BOUNDARY,
+        re.IGNORECASE,
+    )
+    return pattern.sub(lambda match: mapping[match.group(0).lower()], text)
+
+
+# Rewrite the XML inside one cache directory. Binary neighbours are left alone.
+def repair(directory, pairs):
+    for root, _, names in os.walk(directory):
+        for name in names:
+            if not name.endswith(".xml"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, encoding="utf-8", newline="") as handle:
+                    text = handle.read()
+            except (OSError, UnicodeDecodeError):
+                continue
+            updated = rewrite(text, pairs)
+            if updated != text:
+                with open(path, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(updated)
+
+
+moves = data.get("moves") or [
+    {
+        "source": data.get("source"),
+        "dest": data.get("dest"),
+        "cache_renames": data.get("cache_renames") or [],
+    }
+]
+
+for record in reversed(moves):
+    source = str(record.get("source") or "")
+    dest = str(record.get("dest") or "")
+    # Destination first: undo rewrites the new path back to the old one.
+    pairs = variants(dest, source)
+    for old, new in reversed(record.get("cache_renames") or []):
+        if os.path.isdir(new) and not os.path.exists(old):
+            os.rename(new, old)
+            repair(old, pairs)
+            print("Renamed IDE cache " + new + " back to " + old)
+        elif os.path.exists(old):
+            print("IDE cache " + old + " already exists; left it alone.")
+        else:
+            print("IDE cache " + new + " not found; left it alone.")
+PY
+
+# Destination parent directories the run had to create because they did not
+# exist. They come back out innermost first - the recorded order is outermost
+# first, and a parent cannot be empty until its child has gone - and only while
+# they are still empty, so anything a user has since put there survives. A
+# manifest written before this key existed has none, and this does nothing.
+python3 - "$MANIFEST" <<'PY'
+import json, os, sys
+
+with open(sys.argv[1]) as handle:
+    data = json.load(handle)
+
+for directory in reversed(data.get("created_dirs") or []):
+    try:
+        if os.path.isdir(directory) and not os.listdir(directory):
+            os.rmdir(directory)
+            print("Removed " + directory)
+    except OSError:
+        continue
+PY
 
 python3 - "$MANIFEST" <<'PY'
 import datetime, json, sys
@@ -185,6 +426,59 @@ def back_up_products(
     except OSError as exc:
         raise BackupError(f"Could not create the backup: {exc}") from exc
     return names
+
+
+def back_up_claude_files(
+    claude_root: Path, files: Sequence[Path], backup_dir: Path
+) -> list[str]:
+    """Copy the Claude Code files a run is about to rewrite. Returns their paths.
+
+    Only the files that will actually change are copied, and they are stored
+    under ``<backup_dir>/claude/`` at their path relative to ``claude_root`` -
+    at the location they have *before* the entry directories are renamed, which
+    is where they still are when this runs.
+
+    The renames themselves need no copy: an undo reverses one by renaming the
+    directory back, so duplicating a transcript tree that can be hundreds of
+    megabytes would buy nothing. ``shutil.copy2`` rather than ``copy`` keeps
+    each file's permission bits, so a restore cannot widen who can read a
+    transcript.
+
+    Returns the relative paths copied, in the order given.
+    """
+    saved_root = backup_dir / "claude"
+    copied: list[str] = []
+    try:
+        for path in files:
+            relative = path.relative_to(claude_root)
+            target = saved_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+            copied.append(relative.as_posix())
+    except OSError as exc:
+        raise BackupError(f"Could not create the backup: {exc}") from exc
+    return copied
+
+
+def back_up_registry(registry: Path, backup_dir: Path) -> Path:
+    """Copy Claude Code's per-project registry into the backup. Returns the copy.
+
+    The whole file is copied, not just the keys that are about to be renamed.
+    Unlike an entry directory - whose rename an undo reverses by renaming back -
+    the registry is rewritten in place, and it is one file holding every
+    project's tool permissions and MCP servers, so the only reversal that can be
+    trusted is putting the original bytes back.
+
+    ``shutil.copy2`` rather than ``copy`` keeps the permission bits. This file
+    routinely holds API-adjacent settings, so a restore must not be able to
+    widen who can read it.
+    """
+    target = backup_dir / REGISTRY_BACKUP_NAME
+    try:
+        shutil.copy2(registry, target)
+    except OSError as exc:
+        raise BackupError(f"Could not create the backup: {exc}") from exc
+    return target
 
 
 def write_undo_script(backup_dir: Path) -> Path:

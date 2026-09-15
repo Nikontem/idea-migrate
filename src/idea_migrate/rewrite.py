@@ -59,6 +59,13 @@ USER_HOME_MACRO = "$USER_HOME$"
 # so nothing in XML ever puts ">" directly after a path.
 _BOUNDARY = r"""(?=[/"'<\r\n\t]|$)"""
 
+# The same idea for JSON text, which is what Claude Code's session transcripts
+# are. Inside a JSON string a path can only be followed by another path
+# component ("/"), the closing quote of the string, or a backslash starting an
+# escape sequence such as "\n". A space is excluded for the same reason as
+# above: it is legal in a macOS directory name.
+JSON_BOUNDARY = r"""(?=[/"\\]|$)"""
+
 
 def _macro_form(path: Path, home: Path) -> str | None:
     """Return the ``$USER_HOME$``-relative form of a path, or None if not under home."""
@@ -69,7 +76,7 @@ def _macro_form(path: Path, home: Path) -> str | None:
     return f"{USER_HOME_MACRO}/{relative.as_posix()}"
 
 
-def _read_preserving_newlines(path: Path) -> str:
+def read_preserving_newlines(path: Path) -> str:
     """Read a file without translating its line endings.
 
     ``newline=""`` turns off universal-newline translation, so a file written
@@ -110,7 +117,9 @@ def prefix_variants(old: Path, new: Path, home: Path) -> list[tuple[str, str]]:
 
 
 def rewrite_text(
-    text: str, variants: Sequence[tuple[str, str]]
+    text: str,
+    variants: Sequence[tuple[str, str]],
+    boundary: str = _BOUNDARY,
 ) -> tuple[str, int]:
     """Replace every anchored occurrence of each old prefix, in one pass.
 
@@ -120,6 +129,10 @@ def rewrite_text(
     destination nested under the source had its new tail appended twice. The
     longest prefixes are tried first, so where two overlap the most specific one
     wins. Returns the new text and the number of replacements made.
+
+    ``boundary`` is the lookahead that decides what may legally follow a match.
+    It defaults to the XML rule; JSON text uses ``JSON_BOUNDARY`` instead,
+    because the characters that can end a path differ between the two formats.
     """
     ordered = sorted(variants, key=lambda pair: len(pair[0]), reverse=True)
     if not ordered:
@@ -139,7 +152,7 @@ def rewrite_text(
             f"(?P<v{index}>{re.escape(old)})" for index, (old, _) in enumerate(ordered)
         )
         + ")"
-        + _BOUNDARY,
+        + boundary,
         re.IGNORECASE,
     )
     # A lambda keeps the replacement literal - a backslash or \g in a path
@@ -157,6 +170,38 @@ def config_files(product_dir: Path) -> list[Path]:
     return found
 
 
+def write_text_atomically(path: Path, text: str) -> None:
+    """Replace a file's contents in one step, keeping its permissions.
+
+    The new text goes to a temporary file in the same directory - the same
+    directory, so os.replace is a rename within one filesystem and therefore
+    atomic - and is flushed all the way to disk before the swap. A reader can
+    only ever see the whole old file or the whole new one, never a half-written
+    config that an IDE would refuse to load. ``newline=""`` keeps the caller's
+    line endings exactly as given, and the original mode is restored afterwards
+    because the temporary file is created private to the user.
+    """
+    mode = stat.S_IMODE(path.stat().st_mode)
+    handle = tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", newline="", dir=path.parent, delete=False
+    )
+    temp_name = handle.name
+    try:
+        try:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        finally:
+            handle.close()
+        os.replace(temp_name, path)
+    except BaseException:
+        # Never leave a stray temporary file behind in the user's config dir.
+        with contextlib.suppress(OSError):
+            os.unlink(temp_name)
+        raise
+    os.chmod(path, mode)
+
+
 def rewrite_file(
     path: Path, variants: Sequence[tuple[str, str]], dry_run: bool = False
 ) -> int:
@@ -169,7 +214,7 @@ def rewrite_file(
     original untouched.
     """
     try:
-        original = _read_preserving_newlines(path)
+        original = read_preserving_newlines(path)
     except UnicodeDecodeError:
         logger.warning("Skipped %s: it is not valid UTF-8 text.", path)
         return 0
@@ -203,25 +248,7 @@ def rewrite_file(
     if dry_run:
         return count
 
-    mode = stat.S_IMODE(path.stat().st_mode)
-    handle = tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", newline="", dir=path.parent, delete=False
-    )
-    temp_name = handle.name
-    try:
-        try:
-            handle.write(updated)
-            handle.flush()
-            os.fsync(handle.fileno())
-        finally:
-            handle.close()
-        os.replace(temp_name, path)
-    except BaseException:
-        # Never leave a stray temporary file behind in the user's config dir.
-        with contextlib.suppress(OSError):
-            os.unlink(temp_name)
-        raise
-    os.chmod(path, mode)
+    write_text_atomically(path, updated)
     return count
 
 
@@ -252,7 +279,7 @@ def count_references(
     for product_dir in product_dirs:
         for file_path in config_files(product_dir):
             try:
-                text = _read_preserving_newlines(file_path)
+                text = read_preserving_newlines(file_path)
             except UnicodeDecodeError:
                 logger.warning(
                     "Not counted: %s is not valid UTF-8 text.", file_path

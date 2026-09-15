@@ -6,6 +6,14 @@ Three shapes are supported:
     idea-migrate backups
     idea-migrate undo <backup-dir>
 
+This module is a thin layer over :mod:`idea_migrate.batch`. Every decision
+about what a move implies, every guard that can refuse it, and every step that
+actually changes something lives there; what is left here is reading the
+arguments, asking the questions, printing the report and turning an error into
+an exit code. The split is what lets the same decisions be reused by a caller
+that is not a terminal - a batch of five moves, or another program - without
+that caller inheriting a layer that prints as it goes.
+
 Errors the tool raises deliberately are printed as a single line. A traceback
 means a bug, not a user mistake.
 """
@@ -16,28 +24,25 @@ import argparse
 import logging
 import sys
 from collections.abc import Sequence
-from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
 from . import __version__
-from .backup import (
-    UNDO_SCRIPT_NAME,
-    back_up_products,
-    new_backup_dir,
-    write_undo_script,
-)
+from .backup import UNDO_SCRIPT_NAME
+from .batch import BatchRun, Operations, plan_moves, undo_run
+from .claude_projects import preview_rewrites
+from .claude_registry import rewrite_registry
 from .completion import prompt_for_path
-from .config import Config, load_config
-from .errors import MigrateError
+from .config import load_config
+from .errors import MigrateError, RunFailed
 from .listing import find_backups, format_backups
-from .manifest import Manifest, read_manifest, write_manifest
-from .mover import assert_no_ide_running, move_directory
-from .paths import validate_move
-from .products import find_product_dirs
-from .report import format_plan, format_result
-from .rewrite import count_references, prefix_variants, rewrite_products
-from .undo import undo_backup
+from .report import (
+    format_claude_dry_run_sections,
+    format_claude_plan,
+    format_plan,
+    format_result,
+)
+from .rewrite import rewrite_products
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -68,33 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
     undo_parser = sub.add_parser("undo", help="Roll back a previous migration.")
     undo_parser.add_argument("backup_dir", help="The backup directory to roll back.")
     return parser
-
-
-def _find_hardcoded_paths(root: Path, home: Path) -> list[str]:
-    """Return XML files under a ``.idea`` directory in ``root`` whose text
-    contains the literal ``home`` path.
-
-    This only flags references to the user's home directory specifically -
-    an absolute path elsewhere (such as ``/opt/sdk``) is not reported, and a
-    reference that happens to be spelled relative to home is. It is a best
-    effort scan run after a successful migration, so any error partway
-    through returns whatever was found so far rather than failing the run.
-    """
-    warnings: list[str] = []
-    needle = str(home)
-    try:
-        for idea_dir in root.rglob(".idea"):
-            if not idea_dir.is_dir():
-                continue
-            for xml_file in idea_dir.rglob("*.xml"):
-                try:
-                    if needle in xml_file.read_text(encoding="utf-8"):
-                        warnings.append(str(xml_file))
-                except (OSError, UnicodeDecodeError):
-                    continue
-    except OSError:
-        pass
-    return sorted(warnings)
 
 
 def _progress(message: str) -> None:
@@ -132,29 +110,24 @@ def _print_recovery(backup_dir: Path) -> None:
         print(line, file=sys.stderr)
 
 
-def _undo_settings_root(backup_dir: Path, config: Config) -> Path:
-    """Decide which settings directory an undo should restore into.
+def _operations() -> Operations:
+    """Bundle the four operations a run performs, as this module sees them.
 
-    The manifest records where the backup was actually taken from, and that
-    wins. Someone who migrated with a --config pointing jetbrains_root at a
-    non-standard location should not have to remember the same flag to undo,
-    and restoring into the wrong directory would leave the settings they
-    actually use still broken while reporting success. The standalone undo.sh
-    reads the same recorded value, so both routes agree.
-
-    A manifest written before that field existed does not say, and the
-    configured value - the tool's own default unless --config says otherwise -
-    is the best available guess.
-
-    Reading the manifest here can fail: it may be missing or corrupt. That is
-    not diagnosed here, because undo_backup checks it a moment later and
-    reports it properly; the configured value simply stands in until then.
+    The functions are read out of this module's own namespace rather than left
+    to their defaults in :class:`~idea_migrate.batch.Operations`, because the
+    command-line tests replace ``idea_migrate.cli.rewrite_products``,
+    ``idea_migrate.cli.preview_rewrites`` and ``idea_migrate.cli.rewrite_registry``
+    in order to make a run fail at a chosen point. A default would bind the
+    original function and the replacement would never run, so the names are
+    looked up here, while the command is executing, and handed to the batch
+    layer explicitly. ``move_directory`` is not replaced by any test and keeps
+    its default.
     """
-    try:
-        recorded = read_manifest(backup_dir).jetbrains_root
-    except (OSError, ValueError, TypeError):
-        return config.jetbrains_root
-    return Path(recorded) if recorded else config.jetbrains_root
+    return Operations(
+        rewrite_products=rewrite_products,
+        preview_rewrites=preview_rewrites,
+        rewrite_registry=rewrite_registry,
+    )
 
 
 def run_migration(
@@ -163,34 +136,98 @@ def run_migration(
     now: datetime,
     ps_output: str | None = None,
 ) -> int:
-    """Run a migration. Returns a process exit code."""
+    """Run a migration. Returns a process exit code.
+
+    The one move asked for on the command line is planned and executed as a
+    batch of one, so the terminal and any other caller of
+    :mod:`idea_migrate.batch` get the same guards in the same order.
+    """
     config = load_config(Path(args.config) if args.config else None, home)
 
     source = args.source or prompt_for_path("Source directory: ")
     dest = args.dest or prompt_for_path("Destination directory: ")
 
+    # Built once and used for both the planning and the run, so the dry runs
+    # and the real rewrites go through the same four functions.
+    operations = _operations()
+
+    # Everything that can refuse the move is decided here, before a single line
+    # of the plan is printed and while every directory is still in place: the
+    # path checks, the running-IDE guard, and the dry runs that prove the XML,
+    # the transcripts and the registry would all survive being rewritten.
+    # PlanError carries one line per problem, and a batch of one has one
+    # problem, so the message is exactly the single line this used to print.
     try:
-        spec = validate_move(source, dest, home)
-        assert_no_ide_running(ps_output)
+        plan = plan_moves(
+            [(source, dest)],
+            config,
+            home,
+            ps_output=ps_output,
+            operations=operations,
+        )
     except MigrateError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    products = find_product_dirs(config.jetbrains_root, config.exclude_products)
-    variants = prefix_variants(spec.source, spec.dest, spec.home)
-    reference_count = count_references(products, variants)
-
-    print(format_plan(spec.source, spec.dest, reference_count, len(products), config.backup_root))
+    move = plan.moves[0]
+    print(
+        format_plan(
+            move.source,
+            move.dest,
+            move.reference_count,
+            len(plan.products),
+            config.backup_root,
+            cache_count=len(move.cache_renames),
+        )
+    )
+    print(
+        format_claude_plan(
+            move.claude_renames,
+            move.claude_rewrites,
+            move.claude_unmatched,
+            config.claude_root,
+            registry_renames=move.registry_renames,
+            registry_path=plan.registry_path,
+        )
+    )
 
     if args.dry_run:
-        changed = rewrite_products(products, variants, dry_run=True)
+        changed = move.config_changes
         if changed:
             print("Configuration files that would change:")
             for file_path, count in sorted(changed.items()):
                 label = "reference" if count == 1 else "references"
                 print(f"  {file_path}  ({count} {label})")
             print("")
-        print(f"Dry run: {len(changed)} files would be modified. Nothing was written.")
+        sections = format_claude_dry_run_sections(
+            move.claude_renames,
+            move.claude_rewrites,
+            move.claude_unmatched,
+            registry_renames=move.registry_renames,
+            registry_path=plan.registry_path,
+        )
+        if sections:
+            # Already ends in a blank line, so print it as-is.
+            print(sections, end="")
+        # The registry clause is appended only when there is one, so a machine
+        # with no registry - or one nothing in it refers to - gets exactly the
+        # sentence it always got rather than a trailing "and 0 keys". When it
+        # is present the earlier "and" becomes a comma, so the sentence has one
+        # conjunction and not two.
+        if move.registry_renames:
+            summary = (
+                f"Dry run: {len(changed)} files would be modified, "
+                f"{len(move.claude_renames)} Claude Code entries renamed, "
+                f"{len(move.claude_rewrites)} Claude Code files rewritten and "
+                f"{len(move.registry_renames)} project registry keys renamed"
+            )
+        else:
+            summary = (
+                f"Dry run: {len(changed)} files would be modified, "
+                f"{len(move.claude_renames)} Claude Code entries renamed and "
+                f"{len(move.claude_rewrites)} Claude Code files rewritten"
+            )
+        print(f"{summary}. Nothing was written.")
         return 0
 
     if not args.yes:
@@ -203,54 +240,17 @@ def run_migration(
             print("Cancelled. Nothing was changed.")
             return 0
 
-    moved = False
-    backup_dir: Path | None = None
+    run = BatchRun(plan, now=now, progress=_progress, operations=operations)
     try:
-        # Preflight, before anything at all is created. A dry run performs
-        # exactly the validation the real rewrite does - every rewritten file
-        # is parsed to confirm it is still well-formed XML - and writes
-        # nothing. Running it here means a destination path carrying a
-        # character XML cannot hold raw, such as "&" or "<", is rejected while
-        # the directory is still in place, before a multi-gigabyte move rather
-        # than after it, and before a backup directory exists. Running it
-        # after the backup was created left a "pending" backup behind for a
-        # run that never started, which the backups listing then offered undo
-        # commands for - clutter in a directory the tool promises never to
-        # clean up.
-        rewrite_products(products, variants, dry_run=True)
-
-        backup_dir = new_backup_dir(config.backup_root, now)
-        _progress(f"Backing up settings for {len(products)} products...")
-        backed_up = back_up_products(products, backup_dir)
-        write_undo_script(backup_dir)
-
-        manifest = Manifest(
-            version=1,
-            tool_version=__version__,
-            created_at=now.isoformat(),
-            home=str(spec.home),
-            jetbrains_root=str(config.jetbrains_root),
-            source=str(spec.source),
-            dest=str(spec.dest),
-            move_status="pending",
-            backed_up_products=backed_up,
-            rewritten_files={},
-            undone_at=None,
-        )
-        write_manifest(backup_dir, manifest)
-
-        _progress(f"Moving {spec.source} to {spec.dest}...")
-        move_directory(spec)
-        moved = True
-        _progress("Repairing path references in the IDE configuration...")
-        rewritten = rewrite_products(products, variants)
-        remaining = count_references(products, variants)
-
-        write_manifest(backup_dir, replace(manifest, move_status="moved", rewritten_files=rewritten))
-    except (MigrateError, OSError) as exc:
+        result = run.execute()
+    except RunFailed as exc:
+        # The message is the underlying failure's own, unchanged. The recovery
+        # advice is added only when a directory is somewhere other than where
+        # it started, which the run read from the filesystem rather than
+        # inferred from the kind of error.
         print(f"error: {exc}", file=sys.stderr)
-        if moved and backup_dir is not None:
-            _print_recovery(backup_dir)
+        if run.state.anything_moved and run.state.backup_dir is not None:
+            _print_recovery(run.state.backup_dir)
         return 1
     except BaseException:
         # Ctrl-C, or a bug we did not anticipate. The user still needs to
@@ -258,15 +258,26 @@ def run_migration(
         # happened, so print the recovery route before letting this
         # propagate to main() (or, for a bug, all the way out as a
         # traceback - that is still the right outcome for a bug).
-        if moved and backup_dir is not None:
-            _print_recovery(backup_dir)
+        if run.state.anything_moved and run.state.backup_dir is not None:
+            _print_recovery(run.state.backup_dir)
         raise
 
-    _progress("Scanning the moved projects for hardcoded paths...")
-    warnings = _find_hardcoded_paths(spec.dest, spec.home)
+    done = result.moves[0]
     print(
         format_result(
-            spec.source, spec.dest, rewritten, remaining, warnings, backup_dir
+            done.plan.source,
+            done.plan.dest,
+            done.rewritten_files,
+            done.remaining,
+            done.hardcoded_paths,
+            result.backup_dir,
+            claude_renames=done.plan.claude_renames,
+            claude_rewritten=done.claude_rewritten,
+            registry_renamed=done.registry_renamed,
+            registry_path=plan.registry_path,
+            cache_renamed=done.cache_renamed,
+            cache_rewritten=done.cache_rewritten,
+            relink_required=done.plan.cache_relink_required,
         )
     )
     return 0
@@ -295,10 +306,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "undo":
             config = load_config(Path(args.config) if args.config else None, home)
-            backup_dir = Path(args.backup_dir)
-            for line in undo_backup(
-                backup_dir, _undo_settings_root(backup_dir, config), now
-            ):
+            # undo_run decides which settings directory to restore into and
+            # reverses every move the run recorded, in reverse order, whether
+            # that run moved one directory or several.
+            result = undo_run(Path(args.backup_dir), config, now)
+            for line in result.actions:
                 print(line)
             return 0
         return run_migration(args, home, now)

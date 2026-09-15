@@ -24,6 +24,8 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from idea_migrate.claude_projects import encode_project_path
+from idea_migrate.ide_caches import cache_suffix
 from idea_migrate.cli import build_parser, run_migration
 from idea_migrate.manifest import MANIFEST_NAME, Manifest, read_manifest, write_manifest
 from idea_migrate.undo import undo_backup
@@ -31,6 +33,22 @@ from idea_migrate.undo import undo_backup
 QUIET = "/usr/sbin/cfprefsd\n"
 NOW = datetime(2026, 8, 29, 14, 30, 5)
 LATER = datetime(2026, 8, 30, 9, 0, 0)
+
+# One project's recorded external-system state, in the shape IntelliJ writes it:
+# a JSON blob inside a CDATA section, keyed by the build file's absolute path.
+CACHE_STATE = """<project version="4">
+  <component name="ExternalSystemProjectTracker"><![CDATA[{{
+  "projectData": {{"MAVEN": {{"p": {{"settingsTracker": {{"settingsFiles": {{
+    "{project}/pom.xml": 4266877537
+  }}}}}}}}}}
+}}]]></component>
+</project>
+"""
+
+MODULE_XML = """<module external.linked.project.id="$MODULE_DIR$/pom.xml">
+  <component name="NewModuleRootManager" />
+</module>
+"""
 
 RECENT_PROJECTS = """\
 <application>
@@ -56,6 +74,13 @@ WORKSPACE = (
     '<project><component name="X" path="$USER_HOME$/WebstormProjects/alpha" />'
     "</project>\n"
 )
+
+CLAUDE_SESSION = "11111111-2222-3333-4444-555555555555"
+
+
+def claude_jsonl(*records: dict) -> str:
+    """Render records the way Claude Code writes them: one JSON object a line."""
+    return "".join(json.dumps(record) + "\n" for record in records)
 
 
 def snapshot(root: Path, skip: Path) -> dict[str, str]:
@@ -132,11 +157,156 @@ class TestRoundTrip(unittest.TestCase):
         self.source = self.home / "WebstormProjects"
         self.dest = self.home / "Projects" / "WebstormProjects"
 
+        # Claude Code's per-project data for the same directories, inside this
+        # fake home. The real ~/.claude is never read or written.
+        #
+        # This tree is deliberately part of the before/after comparison: the
+        # migration renames two of its directories and rewrites four of its
+        # files, and the safety promise is that undoing puts every byte and
+        # every permission bit back. One transcript is owner-only for the same
+        # reason one configuration file is, so a restore that widened who can
+        # read a session would show up as a difference rather than passing.
+        self.claude_root = self.home / ".claude"
+        self.claude_projects = self.claude_root / "projects"
+        self.claude_projects.mkdir(parents=True)
+        self.alpha = self.source / "alpha"
+
+        self.source_entry = self.claude_projects / encode_project_path(self.source)
+        self.source_entry.mkdir()
+        (self.source_entry / "aaaaaaaa.jsonl").write_text(
+            claude_jsonl(
+                {"type": "user", "cwd": str(self.source), "sessionId": "s1"},
+                {"type": "assistant", "cwd": str(self.source), "sessionId": "s1"},
+            ),
+            encoding="utf-8",
+        )
+
+        self.alpha_entry = self.claude_projects / encode_project_path(self.alpha)
+        self.alpha_entry.mkdir()
+        self.alpha_transcript = self.alpha_entry / f"{CLAUDE_SESSION}.jsonl"
+        self.alpha_transcript.write_text(
+            claude_jsonl(
+                {"type": "user", "cwd": str(self.alpha), "sessionId": CLAUDE_SESSION}
+            ),
+            encoding="utf-8",
+        )
+        self.alpha_transcript.chmod(0o600)
+        subagents = self.alpha_entry / CLAUDE_SESSION / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "agent-x.jsonl").write_text(
+            claude_jsonl(
+                {
+                    "type": "assistant",
+                    "cwd": str(self.alpha),
+                    "sessionId": CLAUDE_SESSION,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # The near-miss sibling: its encoded name starts with the source's but
+        # continues with a letter, so it is a different directory and must be
+        # left exactly as it is.
+        self.archive_entry = self.claude_projects / encode_project_path(
+            self.home / "WebstormProjectsArchive"
+        )
+        self.archive_entry.mkdir()
+        (self.archive_entry / "cccccccc.jsonl").write_text(
+            claude_jsonl(
+                {
+                    "type": "user",
+                    "cwd": str(self.home / "WebstormProjectsArchive"),
+                    "sessionId": "s2",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        # Claude Code's per-project registry, keyed by absolute path. It is
+        # written the way Claude Code writes it - two-space indentation,
+        # non-ASCII left unescaped, no trailing newline - and owner-only,
+        # because it holds every project's tool permissions and MCP servers.
+        # Each of those properties is something a rewrite could quietly change,
+        # and the comparison at the end of the round trip is what catches it.
+        self.registry = self.home / ".claude.json"
+        self.registry_projects = {
+            str(self.source): {"allowedTools": ["Bash(ls:*)"]},
+            str(self.alpha): {"allowedTools": ["Read"], "lastPrompt": "grüße – ✓"},
+            # The same directory spelled with a trailing slash, as Claude Code
+            # records it when it was started that way. It moves too, and keeps
+            # its own trailing slash.
+            f"{self.alpha}/": {"allowedTools": ["Edit"]},
+            str(self.home / "WebstormProjectsArchive"): {"allowedTools": ["Write"]},
+            str(self.home / "Downloads" / "gamma"): {"allowedTools": ["Grep"]},
+        }
+        self.registry.write_text(
+            json.dumps(
+                {"projects": self.registry_projects}, indent=2, ensure_ascii=False
+            ),
+            encoding="utf-8",
+        )
+        self.registry.chmod(0o600)
+
+        # IntelliJ's stored module definitions for the same directories. These
+        # live outside every project, under a directory named for the hash of
+        # the project's absolute path, and they are the one thing under
+        # Library/Caches that does not rebuild itself - see ide_caches. The
+        # migration has to rename them and repair the path recorded inside;
+        # the comparison at the end is what proves the undo puts both back.
+        self.caches_root = self.home / "Library" / "Caches" / "JetBrains"
+        self.source_cache = self._build_cache("WebStorm2026.2", self.source)
+        self.alpha_cache = self._build_cache("IntelliJIdea2026.2", self.alpha)
+        # The near-miss again: a cache for the sibling directory whose path
+        # starts with the source's. Its hash is its own, so nothing should
+        # match it, and its recorded path must survive untouched.
+        self.archive_cache = self._build_cache(
+            "WebStorm2026.2", self.home / "WebstormProjectsArchive"
+        )
+
+        self.claude_history = self.claude_root / "history.jsonl"
+        self.claude_history.write_text(
+            claude_jsonl(
+                {
+                    "display": "run the tests",
+                    "pastedContents": {},
+                    "project": str(self.alpha),
+                    "sessionId": CLAUDE_SESSION,
+                    "timestamp": 1,
+                },
+                {
+                    "display": "somewhere else entirely",
+                    "pastedContents": {},
+                    "project": str(self.home / "Downloads" / "gamma"),
+                    "sessionId": "s9",
+                    "timestamp": 2,
+                },
+            ),
+            encoding="utf-8",
+        )
+
+    def _build_cache(self, product: str, project: Path) -> Path:
+        """Create one project's external module storage, as the IDE writes it."""
+        directory = self.caches_root / product / "projects"
+        directory.mkdir(parents=True, exist_ok=True)
+        cache = directory / f"{project.name}.{cache_suffix(project)}"
+        (cache / "external_build_system" / "modules").mkdir(parents=True)
+        (cache / "cache-state.xml").write_text(
+            CACHE_STATE.format(project=project.as_posix()), encoding="utf-8"
+        )
+        # $MODULE_DIR$-relative, so a move must leave it byte-identical.
+        (cache / "external_build_system" / "modules" / f"{project.name}.xml").write_text(
+            MODULE_XML, encoding="utf-8"
+        )
+        # A binary neighbour, which a text rewrite would corrupt.
+        (cache / "indexingStamp.bin").write_bytes(b"\x00\x01\xff" * 8)
+        return cache
+
     def tearDown(self):
         self._tmp.cleanup()
 
     def test_migrate_then_undo_restores_everything(self):
         before = snapshot(self.home, self.backup_root)
+        registry_before = self.registry.read_bytes()
 
         args = build_parser().parse_args(
             ["--source", str(self.source), "--dest", str(self.dest), "--yes"]
@@ -163,6 +333,74 @@ class TestRoundTrip(unittest.TestCase):
         restricted = self.jetbrains / "PyCharm2025.3" / "options" / "recentProjects.xml"
         self.assertEqual(stat.S_IMODE(restricted.lstat().st_mode), 0o600)
 
+        # Claude Code's data really moved too, otherwise the comparison at the
+        # end would be proving that an undo restores a migration that never
+        # happened.
+        moved_entry = self.claude_projects / encode_project_path(self.dest / "alpha")
+        self.assertTrue(moved_entry.is_dir())
+        self.assertFalse(self.alpha_entry.exists())
+        # The module storage moved with it, under the destination's hash, and
+        # the path recorded inside was repaired.
+        moved_cache = (
+            self.caches_root
+            / "WebStorm2026.2"
+            / "projects"
+            / f"{self.dest.name}.{cache_suffix(self.dest)}"
+        )
+        self.assertTrue(moved_cache.is_dir())
+        self.assertFalse(self.source_cache.exists())
+        self.assertIn(
+            self.dest.as_posix(),
+            (moved_cache / "cache-state.xml").read_text(encoding="utf-8"),
+        )
+        # The sibling's cache was never a candidate and is exactly as it was.
+        self.assertTrue(self.archive_cache.is_dir())
+        self.assertIn(
+            (self.home / "WebstormProjectsArchive").as_posix(),
+            (self.archive_cache / "cache-state.xml").read_text(encoding="utf-8"),
+        )
+
+        moved_transcript = moved_entry / f"{CLAUDE_SESSION}.jsonl"
+        self.assertEqual(
+            json.loads(moved_transcript.read_text(encoding="utf-8"))["cwd"],
+            str(self.dest / "alpha"),
+        )
+        self.assertEqual(stat.S_IMODE(moved_transcript.lstat().st_mode), 0o600)
+        history = [
+            json.loads(line)
+            for line in self.claude_history.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(history[0]["project"], str(self.dest / "alpha"))
+        self.assertEqual(history[1]["project"], str(self.home / "Downloads" / "gamma"))
+        # The lookalike sibling was left alone.
+        self.assertTrue(self.archive_entry.is_dir())
+
+        # The registry moved too: the three keys under the source now name the
+        # destination, each keeping its own spelling of the tail, and each
+        # carrying its settings object across unchanged.
+        registry_projects = json.loads(self.registry.read_text(encoding="utf-8"))[
+            "projects"
+        ]
+        self.assertEqual(
+            registry_projects,
+            {
+                str(self.dest): self.registry_projects[str(self.source)],
+                f"{self.dest}/alpha": self.registry_projects[str(self.alpha)],
+                f"{self.dest}/alpha/": self.registry_projects[f"{self.alpha}/"],
+                str(self.home / "WebstormProjectsArchive"): self.registry_projects[
+                    str(self.home / "WebstormProjectsArchive")
+                ],
+                str(self.home / "Downloads" / "gamma"): self.registry_projects[
+                    str(self.home / "Downloads" / "gamma")
+                ],
+            },
+        )
+        # And it is still owner-only *now*, after the rewrite and before the
+        # undo, for the same reason the restricted configuration file is
+        # checked here: a user who never undoes must not be left with a
+        # world-readable list of their tool permissions.
+        self.assertEqual(stat.S_IMODE(self.registry.lstat().st_mode), 0o600)
+
         backups = sorted(self.backup_root.iterdir())
         self.assertEqual(len(backups), 1)
 
@@ -170,6 +408,13 @@ class TestRoundTrip(unittest.TestCase):
             undo_backup(backups[0], self.jetbrains, LATER, ps_output=QUIET)
 
         self.assertEqual(stat.S_IMODE(restricted.lstat().st_mode), 0o600)
+
+        # The snapshot comparison below already covers this, but the registry
+        # is the one file the tool rewrites as a whole document rather than by
+        # editing text, so "every byte comes back" is worth naming rather than
+        # leaving implied - indentation, unescaped non-ASCII and the absent
+        # trailing newline included.
+        self.assertEqual(self.registry.read_bytes(), registry_before)
 
         after = snapshot(self.home, self.backup_root)
         self.assertEqual(before, after)

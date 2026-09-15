@@ -87,14 +87,24 @@ def format_backups(
             if manifest.undone_at
             else "active"
         )
-        lines.extend(
-            [
-                f"  {summary.directory.name}   ({_human_size(summary.size_bytes)}, {state})",
-                f"    moved:  {manifest.source}",
-                f"        ->  {manifest.dest}",
-                f"    files repaired: {sum(manifest.rewritten_files.values())} "
-                f"across {len(manifest.backed_up_products)} products",
-            ]
+        lines.append(
+            f"  {summary.directory.name}   ({_human_size(summary.size_bytes)}, {state})"
+        )
+        # One pair of lines per directory the run moved. A run that moved
+        # several as one batch is listed in full rather than by its first move,
+        # because the listing is what a user reads to decide which backup to
+        # roll back, and a batch named only by its first move would look like a
+        # run that never touched the other directories.
+        #
+        # A manifest written before batch runs existed describes one move in
+        # its top-level fields, and ``move_records`` returns exactly that, so
+        # such a backup is listed as it always was.
+        for record in manifest.move_records():
+            lines.append(f"    moved:  {record.source}")
+            lines.append(f"        ->  {record.dest}")
+        lines.append(
+            f"    files repaired: {sum(manifest.rewritten_files.values())} "
+            f"across {len(manifest.backed_up_products)} products"
         )
         if not manifest.undone_at:
             # Both routes are listed: the subcommand needs the tool installed
